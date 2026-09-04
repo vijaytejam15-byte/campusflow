@@ -1,12 +1,12 @@
 # ── CampusFlow — Render Blueprint ─────────────────────────────────────────────
 # Deploy both services in one click:
-#   Render → New → Blueprint → connect repo → Apply
+#   Render → New → Blueprint → connect your GitHub repo → Apply
 #
-# Secrets you MUST enter in the Render dashboard when prompted (sync: false):
-#   JWT_SECRET   — run:  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-#   MONGO_URI    — MongoDB Atlas connection string (mongodb+srv://...)
-#   EMAIL_USER   — your Gmail address  (only needed if EMAIL_ENABLED=true)
-#   EMAIL_PASS   — Gmail App Password, 16 chars no spaces  (only if EMAIL_ENABLED=true)
+# Secrets you MUST enter in the Render dashboard when prompted (marked sync: false):
+#   JWT_SECRET   — generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+#   MONGO_URI    — MongoDB Atlas: mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/CampusFlow
+#   EMAIL_USER   — your Gmail address         (only needed when EMAIL_ENABLED=true)
+#   EMAIL_PASS   — Gmail App Password 16 chars (only needed when EMAIL_ENABLED=true)
 
 services:
 
@@ -28,15 +28,14 @@ services:
       - key: NODE_ENV
         value: production
 
-      # LOCAL_DOCKER=false ensures secure HTTPS-only cookies are used in production.
-      # Never set this to "true" on Render.
+      # LOCAL_DOCKER=false → enables secure=true + sameSite=none cookies over HTTPS.
+      # Never change this to "true" on Render.
       - key: LOCAL_DOCKER
         value: "false"
 
-      # Render injects PORT automatically — do NOT set it here.
+      # PORT is injected automatically by Render — do NOT set it here.
 
-      # ── Auth — REQUIRED ──────────────────────────────────────────────────────
-      # Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+      # ── Auth (REQUIRED — set in Render dashboard) ────────────────────────────
       - key: JWT_SECRET
         sync: false
 
@@ -46,27 +45,28 @@ services:
       - key: JWT_REFRESH_IN
         value: 30d
 
-      # ── Database — REQUIRED ──────────────────────────────────────────────────
-      # MongoDB Atlas: mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/CampusFlow
+      # ── Database (REQUIRED — set in Render dashboard) ────────────────────────
+      # MongoDB Atlas connection string:
+      #   mongodb+srv://campusflow:<password>@cluster0.xxxxx.mongodb.net/CampusFlow?retryWrites=true&w=majority
       - key: MONGO_URI
         sync: false
 
-      # ── CORS + Cookie origin ─────────────────────────────────────────────────
+      # ── CORS + cookie origin ─────────────────────────────────────────────────
       # Must exactly match the frontend service URL (no trailing slash).
-      # This also controls which origin receives the httpOnly auth cookie.
+      # Controls which origin receives the httpOnly auth cookie.
       - key: FRONTEND_URL
         value: https://campusflow-frontend.onrender.com
 
-      # ── Redis / BullMQ ────────────────────────────────────────────────────────
-      # Free tier: Redis disabled — escalation job runs in-process via setInterval.
+      # ── Redis / BullMQ ───────────────────────────────────────────────────────
+      # Disabled on free tier — escalation job runs in-process via setInterval.
       - key: REDIS_ENABLED
         value: "false"
       - key: REDIS_URL
         value: ""
 
       # ── Email ────────────────────────────────────────────────────────────────
-      # Set EMAIL_ENABLED to "true" and fill in EMAIL_USER + EMAIL_PASS
-      # once you have a Gmail App Password. Safe to leave false initially.
+      # EMAIL_ENABLED=false is safe for initial deployment.
+      # To enable email: set to "true" and fill in EMAIL_USER + EMAIL_PASS below.
       - key: EMAIL_ENABLED
         value: "false"
       - key: EMAIL_HOST
@@ -82,11 +82,14 @@ services:
       - key: EMAIL_FROM
         value: "CampusFlow <noreply@campusflow.edu>"
 
-      # ── File storage ──────────────────────────────────────────────────────────
+      # ── File storage ─────────────────────────────────────────────────────────
+      # NOTE: "local" storage is ephemeral on Render free tier.
+      # Uploaded files will not persist across deploys/restarts.
+      # Switch to STORAGE_DRIVER=s3 with AWS credentials for persistent uploads.
       - key: STORAGE_DRIVER
         value: local
 
-      # ── Logging ───────────────────────────────────────────────────────────────
+      # ── Logging ──────────────────────────────────────────────────────────────
       - key: LOG_LEVEL
         value: info
 
@@ -94,14 +97,13 @@ services:
   # Frontend — React Static Site
   # Live URL: https://campusflow-frontend.onrender.com
   # ════════════════════════════════════════════════════════════════════════════
-  - type: web
+  - type: static
     name: campusflow-frontend
-    runtime: static
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: build
 
-    # React Router v7: rewrite every path to index.html so direct URLs work.
+    # React Router v7: rewrite every URL to index.html so direct links work.
     routes:
       - type: rewrite
         source: /*
@@ -118,7 +120,7 @@ services:
       - path: /*
         name: Referrer-Policy
         value: strict-origin-when-cross-origin
-      # Long-term cache for hashed static assets (JS/CSS bundles)
+      # Long-term cache for hashed JS/CSS bundles (safe — CRA appends content hash)
       - path: /static/*
         name: Cache-Control
         value: public, max-age=31536000, immutable
@@ -126,6 +128,6 @@ services:
     envVars:
       # Baked into the React bundle at build time.
       # Points all fetch() calls AND Socket.io connections to the backend.
-      # Must match the backend service name above exactly.
+      # Must exactly match the backend service name above.
       - key: REACT_APP_API_URL
         value: https://campusflow-backend.onrender.com
