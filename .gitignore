@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment variables (never commit secrets)
+.env
+.env.local
+.env.production
+**/.env
+# Exception: root .env for local Docker Desktop (safe — contains only dev values)
+# If you add real secrets to root .env, add it back here:
+# /.env
+
+# Build output
+frontend/build/
+backend/dist/
+
+# Uploaded files (keep the directory, ignore contents)
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# MongoDB memory server cache
+.cache/
+**/.cache/
+
+# Test coverage
+coverage/
+
+# Misc
+*.local

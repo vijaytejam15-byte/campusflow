@@ -1,0 +1,118 @@
+# ── CampusFlow — Render Blueprint ─────────────────────────────────────────────
+# One-click deployment via Render Blueprint.
+#
+# STEP 1: Push this repo to GitHub (public or private).
+# STEP 2: Go to render.com → New → Blueprint → Connect your repo.
+# STEP 3: Render reads this file and creates both services automatically.
+# STEP 4: Fill in the 4 secret values when prompted (marked with sync: false).
+#
+# Secrets you must provide (never hardcode them here):
+#   JWT_SECRET   — a random 64-char hex string
+#   MONGO_URI    — your MongoDB Atlas connection string
+#   EMAIL_USER   — your Gmail address
+#   EMAIL_PASS   — your Gmail App Password (16 chars)
+
+services:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Backend — Node.js Web Service
+  # URL will be: https://campusflow-backend.onrender.com
+  # ════════════════════════════════════════════════════════════════════════════
+  - type: web
+    name: campusflow-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm ci --omit=dev
+    startCommand: node server.js
+    plan: free
+    healthCheckPath: /health
+
+    envVars:
+      # ── Server ──────────────────────────────────────────────────────────────
+      - key: NODE_ENV
+        value: production
+      - key: LOCAL_DOCKER
+        value: "false"           # IMPORTANT: must be false — enables secure HTTPS cookies
+      # NOTE: Do NOT set PORT here — Render injects $PORT automatically
+
+      # ── Auth (REQUIRED — fill in Render dashboard) ───────────────────────
+      - key: JWT_SECRET
+        sync: false              # generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+      # ── Database (REQUIRED — fill in Render dashboard) ──────────────────
+      - key: MONGO_URI
+        sync: false              # MongoDB Atlas: mongodb+srv://user:pass@cluster.mongodb.net/CampusFlow
+
+      # ── CORS + Cookie domain (fill in after frontend is deployed) ────────
+      - key: FRONTEND_URL
+        value: https://campusflow-frontend.onrender.com   # update if your service name differs
+
+      # ── Redis / BullMQ ────────────────────────────────────────────────────
+      - key: REDIS_ENABLED
+        value: "false"           # jobs run in-process without Redis (fine for free tier)
+      - key: REDIS_URL
+        value: ""
+
+      # ── Gmail email notifications ─────────────────────────────────────────
+      - key: EMAIL_ENABLED
+        value: "false"           # change to "true" after adding EMAIL_USER + EMAIL_PASS below
+      - key: EMAIL_HOST
+        value: smtp.gmail.com
+      - key: EMAIL_PORT
+        value: "587"
+      - key: EMAIL_SECURE
+        value: "false"
+      - key: EMAIL_USER
+        sync: false              # your Gmail address, e.g. yourname@gmail.com
+      - key: EMAIL_PASS
+        sync: false              # Gmail App Password (16 chars, no spaces)
+      - key: EMAIL_FROM
+        value: "CampusFlow <noreply@campusflow.edu>"  # update to your Gmail address after enabling email
+
+      # ── File storage ──────────────────────────────────────────────────────
+      - key: STORAGE_DRIVER
+        value: local
+
+      # ── Logging ───────────────────────────────────────────────────────────
+      - key: LOG_LEVEL
+        value: info
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Frontend — React Static Site
+  # URL will be: https://campusflow-frontend.onrender.com
+  # ════════════════════════════════════════════════════════════════════════════
+  - type: web
+    name: campusflow-frontend
+    runtime: static
+    rootDir: frontend
+
+    # REACT_APP_API_URL bakes the backend URL into the React bundle at build time.
+    # It must match the backend service name exactly.
+    buildCommand: npm ci && npm run build
+    staticPublishPath: build
+
+    # React Router: serve index.html for every path so direct URLs work
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+    # Security headers
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: SAMEORIGIN
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /static/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+
+    envVars:
+      # Baked into the React build — points all API + Socket.io calls to the backend
+      - key: REACT_APP_API_URL
+        value: https://campusflow-backend.onrender.com   # must match backend service name

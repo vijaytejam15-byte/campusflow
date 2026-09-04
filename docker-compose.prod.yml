@@ -1,0 +1,24 @@
+# ── CampusFlow — Production override for docker-compose.yml ───────────────────
+#
+# Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# This file:
+#   1. Removes LOCAL_DOCKER flag so secure cookies are enforced over HTTPS
+#   2. Removes direct port binding (handled by a reverse proxy / cloud LB)
+#   3. Sets production-correct defaults
+#
+# Set these environment variables before running:
+#   JWT_SECRET    — strong random secret
+#   MONGO_PASS    — strong MongoDB password
+#   FRONTEND_URL  — your public HTTPS domain, e.g. https://campusflow.example.com
+
+services:
+  backend:
+    environment:
+      # Remove LOCAL_DOCKER so cookies use secure=true + sameSite=none (HTTPS required)
+      LOCAL_DOCKER: "false"
+
+  frontend:
+    # Remove direct port binding — let the reverse proxy / cloud provider handle it
+    ports: !reset []

@@ -1,0 +1,14 @@
+node_modules
+.env
+.env.local
+uploads
+*.log
+coverage
+.nyc_output
+tests
+*.test.js
+.git
+.gitignore
+README.md
+Dockerfile
+.dockerignore
