@@ -12,6 +12,9 @@
     "testEnvironment": "node",
     "testTimeout": 30000
   },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
