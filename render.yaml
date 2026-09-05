@@ -97,8 +97,9 @@ services:
   # Frontend — React Static Site
   # Live URL: https://campusflow-frontend.onrender.com
   # ════════════════════════════════════════════════════════════════════════════
-  - type: static
+  - type: web
     name: campusflow-frontend
+    runtime: static
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: build
