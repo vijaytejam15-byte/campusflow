@@ -46,3 +46,6 @@ coverage/
 
 # Misc
 *.local
+
+# GitHub Actions (requires workflow OAuth scope to push)
+.github/
