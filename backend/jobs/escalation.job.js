@@ -109,10 +109,13 @@ async function runEscalationCheck() {
  */
 function startEscalationJob(intervalMs = 15 * 60 * 1000) {
   logger.info(`[EscalationJob] Starting`, { intervalSec: intervalMs / 1000 });
-  // Run once immediately on startup
-  runEscalationCheck().catch((err) =>
-    console.error("[EscalationJob] Initial run failed:", err.message)
-  );
+  // Delay initial run by 5 seconds to allow Mongoose connection pool to fully settle
+  // (avoids "Invalid namespace" errors on cold starts before collections are registered)
+  setTimeout(() => {
+    runEscalationCheck().catch((err) =>
+      console.error("[EscalationJob] Initial run failed:", err.message)
+    );
+  }, 5000);
   return setInterval(() => {
     runEscalationCheck().catch((err) =>
       console.error("[EscalationJob] Run failed:", err.message)
