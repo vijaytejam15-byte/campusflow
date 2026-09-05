@@ -132,5 +132,6 @@ services:
       # Baked into the React bundle at build time.
       # Points all fetch() calls AND Socket.io connections to the backend.
       # Must exactly match the backend service name above.
+      # Last verified: campusflow-backend-s6mi.onrender.com (commit forced rebuild)
       - key: REACT_APP_API_URL
         value: https://campusflow-backend-s6mi.onrender.com
