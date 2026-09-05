@@ -55,7 +55,7 @@ services:
       # Must exactly match the frontend service URL (no trailing slash).
       # Controls which origin receives the httpOnly auth cookie.
       - key: FRONTEND_URL
-        value: https://campusflow-frontend.onrender.com
+        value: https://campusflow-frontend-1fwd.onrender.com
       # NOTE: If Render assigns a unique suffix to the service name (e.g. campusflow-backend-s6mi),
       # update REACT_APP_API_URL below and FRONTEND_URL above to match the actual Render URLs.
 
