@@ -56,6 +56,8 @@ services:
       # Controls which origin receives the httpOnly auth cookie.
       - key: FRONTEND_URL
         value: https://campusflow-frontend.onrender.com
+      # NOTE: If Render assigns a unique suffix to the service name (e.g. campusflow-backend-s6mi),
+      # update REACT_APP_API_URL below and FRONTEND_URL above to match the actual Render URLs.
 
       # ── Redis / BullMQ ───────────────────────────────────────────────────────
       # Disabled on free tier — escalation job runs in-process via setInterval.
@@ -131,4 +133,4 @@ services:
       # Points all fetch() calls AND Socket.io connections to the backend.
       # Must exactly match the backend service name above.
       - key: REACT_APP_API_URL
-        value: https://campusflow-backend.onrender.com
+        value: https://campusflow-backend-s6mi.onrender.com
