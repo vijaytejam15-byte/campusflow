@@ -18,6 +18,9 @@ const { queueEmail }        = require("../queues/workers");
 
 const router = express.Router();
 
+// ── Workflow engine (additive — does not break existing flow) ────────────────
+const workflowSvc = require("../services/workflow.service");
+
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 function isValidId(id) {
@@ -267,6 +270,25 @@ router.post("/", requireAuth, async (req, res, next) => {
     request.slaDeadline = new Date(Date.now() + hours * 60 * 60 * 1000);
 
     await request.save();
+
+    // ── Configurable Workflow Engine (additive, non-breaking) ──────────────
+    // If an active template exists for this request type, create an instance.
+    // Failures are non-fatal — the request is already saved.
+    try {
+      const template = await workflowSvc.findActiveTemplate("request", fields.type || "general");
+      if (template) {
+        const instance = await workflowSvc.createInstance(
+          request._id,
+          "request",
+          template._id,
+          req.userId
+        );
+        request.workflowInstanceId = instance._id;
+        await request.save();
+      }
+    } catch (wfErr) {
+      logger.warn("[Workflow] Failed to create workflow instance", { error: wfErr.message });
+    }
 
     // Notify reviewers in real-time
     try {

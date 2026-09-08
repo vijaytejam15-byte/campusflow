@@ -42,6 +42,8 @@ import AdminRequests       from "./pages/admin/AdminRequests";
 import AnalyticsDashboard  from "./pages/admin/AnalyticsDashboard";
 import ManageLeaveTypes    from "./pages/admin/ManageLeaveTypes";
 import LeaveReports        from "./pages/admin/LeaveReports";
+import WorkflowTemplates       from "./pages/admin/WorkflowTemplates";
+import WorkflowTemplateBuilder from "./pages/admin/WorkflowTemplateBuilder";
 
 import "./App.css";
 
@@ -134,6 +136,9 @@ function AppRoutes() {
               <Route path="/admin/requests"         element={<AdminRequests />} />
               <Route path="/admin/leave-types"      element={<ManageLeaveTypes />} />
               <Route path="/admin/leave-reports"    element={<LeaveReports />} />
+              <Route path="/admin/workflow-templates"     element={<WorkflowTemplates />} />
+              <Route path="/admin/workflow-templates/new" element={<WorkflowTemplateBuilder />} />
+              <Route path="/admin/workflow-templates/:id" element={<WorkflowTemplateBuilder />} />
             </Route>
 
           </Route>

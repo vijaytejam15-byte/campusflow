@@ -1,0 +1,246 @@
+/**
+ * workflowTemplate.routes.js — Admin CRUD for workflow templates.
+ * Mounted at /api/admin/workflow-templates
+ *
+ * All routes require admin role. Implements versioning: editing a template
+ * bumps its version but never mutates in-flight WorkflowInstances.
+ */
+"use strict";
+
+const express          = require("express");
+const mongoose         = require("mongoose");
+const WorkflowTemplate = require("../models/WorkflowTemplate");
+const WorkflowInstance = require("../models/WorkflowInstance");
+const { requireAuth }  = require("../middleware/auth");
+const User             = require("../models/User");
+
+const router = express.Router();
+
+// ── Auth guard ────────────────────────────────────────────────────────────────
+async function requireAdmin(req, res, next) {
+  try {
+    const user = await User.findById(req.userId).select("role").lean();
+    if (!user || user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+    next();
+  } catch (err) { next(err); }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function isValidId(id) {
+  return mongoose.Types.ObjectId.isValid(id);
+}
+
+function validateStages(stages) {
+  if (!Array.isArray(stages) || stages.length === 0) {
+    return "At least one stage is required";
+  }
+  const validRoles    = ["faculty", "hod", "admin", "specific"];
+  const validActions  = ["approve", "reject", "escalate", "close", "request_info"];
+  for (const [i, s] of stages.entries()) {
+    if (!s.name || !String(s.name).trim()) return `Stage ${i + 1}: name is required`;
+    if (!validRoles.includes(s.assigneeRole))
+      return `Stage ${i + 1}: invalid assigneeRole "${s.assigneeRole}"`;
+    if (!Array.isArray(s.allowedActions) || s.allowedActions.length === 0)
+      return `Stage ${i + 1}: allowedActions must be a non-empty array`;
+    for (const a of s.allowedActions) {
+      if (!validActions.includes(a))
+        return `Stage ${i + 1}: invalid action "${a}"`;
+    }
+    if (s.slaHours !== undefined && (typeof s.slaHours !== "number" || s.slaHours < 0))
+      return `Stage ${i + 1}: slaHours must be a non-negative number`;
+  }
+  return null;
+}
+
+// ── GET /api/admin/workflow-templates ─────────────────────────────────────────
+router.get("/", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { entityKind, active } = req.query;
+    const query = {};
+    if (entityKind) query.entityKind = entityKind;
+    if (active !== undefined) query.isActive = active === "true";
+
+    const templates = await WorkflowTemplate.find(query)
+      .sort({ createdAt: -1 })
+      .populate("createdBy", "name email")
+      .lean();
+
+    res.json({ templates });
+  } catch (err) { next(err); }
+});
+
+// ── GET /api/admin/workflow-templates/:id ─────────────────────────────────────
+router.get("/:id", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    if (!isValidId(req.params.id))
+      return res.status(400).json({ message: "Invalid template id" });
+
+    const template = await WorkflowTemplate.findById(req.params.id)
+      .populate("createdBy", "name email")
+      .lean();
+    if (!template) return res.status(404).json({ message: "Template not found" });
+
+    // Count active instances using this template
+    const activeInstances = await WorkflowInstance.countDocuments({
+      templateId:    template._id,
+      overallStatus: "in_progress",
+    });
+
+    res.json({ template, activeInstances });
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/admin/workflow-templates ────────────────────────────────────────
+router.post("/", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { name, description, appliesToTypes, entityKind, isActive, stages } = req.body || {};
+
+    if (!name || !String(name).trim())
+      return res.status(400).json({ message: "Template name is required" });
+
+    const stageError = validateStages(stages);
+    if (stageError) return res.status(400).json({ message: stageError });
+
+    // Normalise stages — assign order based on array position
+    const normStages = stages.map((s, i) => ({
+      order:             i + 1,
+      name:              String(s.name).trim(),
+      assigneeRole:      s.assigneeRole || "faculty",
+      assigneeUserId:    s.assigneeUserId || null,
+      allowedActions:    s.allowedActions,
+      requiresComment:   !!s.requiresComment,
+      slaHours:          typeof s.slaHours === "number" ? s.slaHours : 48,
+      notifyOnEnter:     Array.isArray(s.notifyOnEnter) ? s.notifyOnEnter : ["student"],
+      autoAdvance:       !!s.autoAdvance,
+      autoAdvanceAction: s.autoAdvanceAction || null,
+    }));
+
+    const template = await WorkflowTemplate.create({
+      name:           String(name).trim(),
+      description:    description ? String(description).trim() : "",
+      appliesToTypes: Array.isArray(appliesToTypes) ? appliesToTypes : [],
+      entityKind:     entityKind || "request",
+      isActive:       isActive !== false,
+      stages:         normStages,
+      version:        1,
+      createdBy:      req.userId,
+    });
+
+    res.status(201).json({ message: "Workflow template created", template });
+  } catch (err) { next(err); }
+});
+
+// ── PUT /api/admin/workflow-templates/:id — Update (bumps version) ────────────
+router.put("/:id", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    if (!isValidId(req.params.id))
+      return res.status(400).json({ message: "Invalid template id" });
+
+    const template = await WorkflowTemplate.findById(req.params.id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+
+    const { name, description, appliesToTypes, isActive, stages } = req.body || {};
+
+    if (stages !== undefined) {
+      const stageError = validateStages(stages);
+      if (stageError) return res.status(400).json({ message: stageError });
+    }
+
+    // Check if active instances exist — warn but allow update (version bump protects them)
+    const activeCount = await WorkflowInstance.countDocuments({
+      templateId:    template._id,
+      overallStatus: "in_progress",
+    });
+
+    if (name !== undefined)           template.name           = String(name).trim();
+    if (description !== undefined)    template.description    = String(description).trim();
+    if (appliesToTypes !== undefined) template.appliesToTypes = Array.isArray(appliesToTypes) ? appliesToTypes : [];
+    if (isActive !== undefined)       template.isActive       = !!isActive;
+
+    if (stages !== undefined) {
+      template.stages = stages.map((s, i) => ({
+        order:             i + 1,
+        name:              String(s.name).trim(),
+        assigneeRole:      s.assigneeRole || "faculty",
+        assigneeUserId:    s.assigneeUserId || null,
+        allowedActions:    s.allowedActions,
+        requiresComment:   !!s.requiresComment,
+        slaHours:          typeof s.slaHours === "number" ? s.slaHours : 48,
+        notifyOnEnter:     Array.isArray(s.notifyOnEnter) ? s.notifyOnEnter : ["student"],
+        autoAdvance:       !!s.autoAdvance,
+        autoAdvanceAction: s.autoAdvanceAction || null,
+      }));
+      // Bump version so in-flight instances (which hold snapshots) are unaffected
+      template.version = (template.version || 1) + 1;
+    }
+
+    await template.save();
+    res.json({
+      message:         "Workflow template updated",
+      template,
+      activeInstances: activeCount,
+      note:            activeCount > 0
+        ? `${activeCount} in-progress instance(s) continue using the previous version snapshot`
+        : undefined,
+    });
+  } catch (err) { next(err); }
+});
+
+// ── PATCH /api/admin/workflow-templates/:id/activate ─────────────────────────
+router.patch("/:id/activate", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    if (!isValidId(req.params.id))
+      return res.status(400).json({ message: "Invalid template id" });
+
+    const template = await WorkflowTemplate.findById(req.params.id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+
+    template.isActive = true;
+    await template.save();
+    res.json({ message: "Template activated", template });
+  } catch (err) { next(err); }
+});
+
+// ── PATCH /api/admin/workflow-templates/:id/deactivate ───────────────────────
+router.patch("/:id/deactivate", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    if (!isValidId(req.params.id))
+      return res.status(400).json({ message: "Invalid template id" });
+
+    const template = await WorkflowTemplate.findById(req.params.id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+
+    template.isActive = false;
+    await template.save();
+    res.json({ message: "Template deactivated", template });
+  } catch (err) { next(err); }
+});
+
+// ── DELETE /api/admin/workflow-templates/:id — soft delete ───────────────────
+router.delete("/:id", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    if (!isValidId(req.params.id))
+      return res.status(400).json({ message: "Invalid template id" });
+
+    const template = await WorkflowTemplate.findById(req.params.id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+
+    const activeCount = await WorkflowInstance.countDocuments({
+      templateId: template._id, overallStatus: "in_progress",
+    });
+    if (activeCount > 0) {
+      return res.status(409).json({
+        message: `Cannot delete: ${activeCount} active instance(s) are using this template`,
+      });
+    }
+
+    template.isActive = false;
+    template.name     = `[DELETED] ${template.name}`;
+    await template.save();
+    res.json({ message: "Template deleted (soft)" });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;

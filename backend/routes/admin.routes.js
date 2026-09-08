@@ -17,6 +17,10 @@ const publicUser      = require("../utils/publicUser");
 
 const router = express.Router();
 
+// ── Workflow template sub-router (admin only) ─────────────────────────────────
+const workflowTemplateRoutes = require("./workflowTemplate.routes");
+router.use("/workflow-templates", workflowTemplateRoutes);
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 async function requireAdmin(req, res, next) {

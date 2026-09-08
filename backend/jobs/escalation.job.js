@@ -18,6 +18,8 @@ const User       = require("../models/User");
 const { emitRequestStatusUpdated } = require("../socket/socketHandler");
 const emailSvc   = require("../services/email.service");
 const logger     = require("../config/logger");
+// Workflow engine SLA integration (additive — never affects legacy requests)
+const workflowSvc = require("../services/workflow.service");
 
 const OPEN_STATUSES = ["pending", "in_review"];
 const AUTO_ESCALATE_COMMENT = "Automatically escalated: SLA deadline exceeded without resolution.";
@@ -99,6 +101,17 @@ async function runEscalationCheck() {
   }
 
   logger.info(`[EscalationJob] Done`, { breached: stats.breached, escalated: stats.escalated });
+
+  // ── Workflow engine SLA breach scan (additive) ───────────────────────────
+  try {
+    const wfStats = await workflowSvc.checkSLABreaches();
+    if (wfStats.breached > 0) {
+      logger.info("[EscalationJob] Workflow SLA breaches", wfStats);
+    }
+  } catch (err) {
+    logger.error("[EscalationJob] Workflow SLA scan error", { error: err.message });
+  }
+
   return stats;
 }
 

@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import { getRequestById, addComment, REQUEST_TYPES, PRIORITIES } from "../../services/requestService";
-import { useAuth }    from "../../hooks/useAuth";
-import StatusBadge    from "../../components/shared/StatusBadge";
-import SLABadge       from "../../components/shared/SLABadge";
-import Timeline       from "../../components/shared/Timeline";
+import { getRequestWorkflow, advanceRequestWorkflow } from "../../services/workflowService";
+import { useAuth }           from "../../hooks/useAuth";
+import StatusBadge           from "../../components/shared/StatusBadge";
+import SLABadge              from "../../components/shared/SLABadge";
+import Timeline              from "../../components/shared/Timeline";
+import WorkflowTracker       from "../../components/shared/WorkflowTracker";
+import WorkflowStageActions  from "../../components/shared/WorkflowStageActions";
 
 // ── Label maps ──────────────────────────────────────────────────────────────
 const TYPE_LABEL     = Object.fromEntries(REQUEST_TYPES.map((t) => [t.value, t.label]));
@@ -51,9 +54,12 @@ export default function RequestDetails() {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const [request, setRequest] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState("");
+  const [request,  setRequest]  = useState(null);
+  const [loading,  setLoading]  = useState(true);
+  const [error,    setError]    = useState("");
+  const [workflow, setWorkflow] = useState(null);
+  const [wfSubmitting, setWfSubmitting] = useState(false);
+  const [wfError,      setWfError]      = useState("");
 
   // Inline comment box
   const [newComment,     setNewComment]     = useState("");
@@ -76,6 +82,10 @@ export default function RequestDetails() {
       try {
         const data = await getRequestById(id);
         if (!cancelled) setRequest(data.request);
+        // Load workflow if one exists (non-blocking)
+        getRequestWorkflow(id).then((d) => {
+          if (!cancelled && d) setWorkflow(d.workflow);
+        }).catch(() => {});
       } catch (err) {
         if (!cancelled) setError(err.message || "Could not load request details.");
       } finally {
@@ -107,6 +117,23 @@ export default function RequestDetails() {
       setCommentError(err.message || "Could not post comment.");
     } finally {
       setPostingComment(false);
+    }
+  }
+
+  async function handleWorkflowAction(action, comment) {
+    setWfSubmitting(true);
+    setWfError("");
+    try {
+      const result = await advanceRequestWorkflow(id, action, comment);
+      setWorkflow(result.workflow);
+      // Refresh request to pick up synced status
+      const data = await getRequestById(id);
+      setRequest(data.request);
+    } catch (err) {
+      setWfError(err.message || "Workflow action failed.");
+      throw err;
+    } finally {
+      setWfSubmitting(false);
     }
   }
 
@@ -170,6 +197,23 @@ export default function RequestDetails() {
         <h2 className="cf-tile__title" style={{ marginBottom: 18 }}>Progress</h2>
         <Timeline currentStatus={request.status} comments={request.comments} />
       </section>
+
+      {/* Configurable workflow tracker (shown when a workflow instance exists) */}
+      {workflow && <WorkflowTracker workflow={workflow} entityType="request" />}
+
+      {/* Workflow stage actions for reviewers */}
+      {workflow && isReviewerView && !workflow.isTerminal && (
+        <section className="cf-tile" style={{ marginBottom: 20 }}>
+          <h2 className="cf-tile__title">Workflow Action</h2>
+          {wfError && <div className="cf-alert cf-alert--error" role="alert">{wfError}</div>}
+          <WorkflowStageActions
+            workflow={workflow}
+            onAction={handleWorkflowAction}
+            submitting={wfSubmitting}
+            userRole={role}
+          />
+        </section>
+      )}
 
       {/* Summary */}
       <section className="cf-tile" style={{ marginBottom: 20 }}>

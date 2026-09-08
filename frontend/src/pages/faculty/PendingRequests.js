@@ -11,6 +11,9 @@ import SLABadge     from "../../components/shared/SLABadge";
 import Pagination   from "../../components/shared/Pagination";
 import ReviewModal  from "../../components/shared/ReviewModal";
 import { useAuth }  from "../../hooks/useAuth";
+// Workflow engine integration (additive — shown only when instance exists)
+import { getRequestWorkflow, advanceRequestWorkflow } from "../../services/workflowService";
+import WorkflowStageActions from "../../components/shared/WorkflowStageActions";
 
 const PAGE_SIZE = 20;
 
@@ -74,6 +77,8 @@ export default function PendingRequests() {
   const [submitting,  setSubmitting]  = useState(false);
   const [actionError, setActionError] = useState("");
   const [actionMsg,   setActionMsg]   = useState("");
+  // Workflow instances cache: { [requestId]: workflow | null }
+  const [workflows, setWorkflows] = useState({});
 
   const abortRef    = useRef(null);
   const debounceRef = useRef(null);
@@ -260,10 +265,30 @@ export default function PendingRequests() {
                     role="button"
                     tabIndex={0}
                     aria-expanded={isOpen}
-                    onClick={() => setExpandedId(isOpen ? null : req._id)}
+                    onClick={() => {
+                      const opening = expandedId !== req._id;
+                      setExpandedId(isOpen ? null : req._id);
+                      // Load workflow instance when expanding (non-blocking)
+                      if (opening && !(req._id in workflows)) {
+                        getRequestWorkflow(req._id).then((d) =>
+                          setWorkflows((prev) => ({ ...prev, [req._id]: d?.workflow || null }))
+                        ).catch(() =>
+                          setWorkflows((prev) => ({ ...prev, [req._id]: null }))
+                        );
+                      }
+                    }}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ")
+                      if (e.key === "Enter" || e.key === " ") {
+                        const opening = expandedId !== req._id;
                         setExpandedId(isOpen ? null : req._id);
+                        if (opening && !(req._id in workflows)) {
+                          getRequestWorkflow(req._id).then((d) =>
+                            setWorkflows((prev) => ({ ...prev, [req._id]: d?.workflow || null }))
+                          ).catch(() =>
+                            setWorkflows((prev) => ({ ...prev, [req._id]: null }))
+                          );
+                        }
+                      }
                     }}
                   >
                     <div className="cf-req-card__meta">
@@ -363,6 +388,34 @@ export default function PendingRequests() {
                               ↑ Escalate to HOD
                             </button>
                           )}
+                        </div>
+                      )}
+
+                      {/* Workflow stage actions — shown when a workflow instance exists */}
+                      {workflows[req._id] && !workflows[req._id].isTerminal && (
+                        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--cf-border, #e5e7eb)" }}>
+                          <p style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
+                            Workflow: <strong>{workflows[req._id].templateName}</strong>
+                          </p>
+                          <WorkflowStageActions
+                            workflow={workflows[req._id]}
+                            userRole={user?.role}
+                            submitting={submitting}
+                            onAction={async (action, comment) => {
+                              setSubmitting(true);
+                              setActionError("");
+                              try {
+                                const result = await advanceRequestWorkflow(req._id, action, comment);
+                                setWorkflows((prev) => ({ ...prev, [req._id]: result.workflow }));
+                                setActionMsg(`Workflow action "${action}" recorded.`);
+                                await load(filterType, filterPriority, search, page);
+                              } catch (err) {
+                                setActionError(err.message || "Workflow action failed.");
+                              } finally {
+                                setSubmitting(false);
+                              }
+                            }}
+                          />
                         </div>
                       )}
 

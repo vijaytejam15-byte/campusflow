@@ -109,6 +109,15 @@ const leaveSchema = new mongoose.Schema(
 
     // When a reviewer last acted
     reviewedAt: { type: Date, default: null },
+
+    // ── Configurable Workflow Engine (optional) ───────────────────────────────
+    // Null for legacy leave applications (flat status workflow applies).
+    workflowInstanceId: {
+      type:    mongoose.Schema.Types.ObjectId,
+      ref:     "WorkflowInstance",
+      default: null,
+      index:   true,
+    },
   },
   { timestamps: true }
 );

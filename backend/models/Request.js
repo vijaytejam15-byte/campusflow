@@ -192,6 +192,16 @@ const requestSchema = new mongoose.Schema(
       type:    Boolean,
       default: false,
     },
+
+    // ── Configurable Workflow Engine (optional) ───────────────────────────────
+    // Null for legacy requests (flat status workflow applies).
+    // Set when a WorkflowTemplate is active for this request type at submission.
+    workflowInstanceId: {
+      type:    mongoose.Schema.Types.ObjectId,
+      ref:     "WorkflowInstance",
+      default: null,
+      index:   true,
+    },
   },
   { timestamps: true }
 );

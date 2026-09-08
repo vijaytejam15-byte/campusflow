@@ -1583,3 +1583,485 @@ describe("Email service configuration", () => {
     process.env.EMAIL_PASSWORD = origPassword || "";
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workflow Engine Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+const WorkflowTemplate = require("../models/WorkflowTemplate");
+const WorkflowInstance = require("../models/WorkflowInstance");
+const workflowSvc      = require("../services/workflow.service");
+// Note: User and request are already declared earlier in this file
+
+function makeTemplate(overrides = {}) {
+  return {
+    name:           "Test Workflow",
+    description:    "A test template",
+    entityKind:     "request",
+    appliesToTypes: ["general"],
+    isActive:       true,
+    stages: [
+      {
+        order:           1,
+        name:            "Faculty Review",
+        assigneeRole:    "faculty",
+        allowedActions:  ["approve", "reject", "escalate"],
+        requiresComment: false,
+        slaHours:        24,
+        notifyOnEnter:   ["student"],
+        autoAdvance:     false,
+      },
+      {
+        order:           2,
+        name:            "HOD Approval",
+        assigneeRole:    "hod",
+        allowedActions:  ["approve", "reject", "close"],
+        requiresComment: true,
+        slaHours:        48,
+        notifyOnEnter:   ["student"],
+        autoAdvance:     false,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+// ── WorkflowTemplate CRUD ─────────────────────────────────────────────────────
+
+describe("Workflow Template API (admin)", () => {
+  let adminAgent;
+  let studentAgent;
+
+  beforeEach(async () => {
+    adminAgent   = request.agent(app);
+    studentAgent = request.agent(app);
+
+    // Create and promote admin
+    await adminAgent.post("/api/register").send({ name: "Admin", email: "wfadmin@test.com", password: "pass1234" });
+    await User.updateOne({ email: "wfadmin@test.com" }, { role: "admin" });
+    await adminAgent.post("/api/login").send({ email: "wfadmin@test.com", password: "pass1234" });
+
+    // Student
+    await studentAgent.post("/api/register").send({ name: "Student", email: "wfstudent@test.com", password: "pass1234" });
+    await studentAgent.post("/api/login").send({ email: "wfstudent@test.com", password: "pass1234" });
+  });
+
+  it("admin can create a workflow template", async () => {
+    const res = await adminAgent.post("/api/admin/workflow-templates").send(makeTemplate());
+    expect(res.status).toBe(201);
+    expect(res.body.template.name).toBe("Test Workflow");
+    expect(res.body.template.stages).toHaveLength(2);
+    expect(res.body.template.version).toBe(1);
+  });
+
+  it("admin can list workflow templates", async () => {
+    await adminAgent.post("/api/admin/workflow-templates").send(makeTemplate());
+    const res = await adminAgent.get("/api/admin/workflow-templates");
+    expect(res.status).toBe(200);
+    expect(res.body.templates.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("admin can get a single template", async () => {
+    const created = await adminAgent.post("/api/admin/workflow-templates").send(makeTemplate());
+    const id = created.body.template._id;
+    const res = await adminAgent.get(`/api/admin/workflow-templates/${id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.template._id).toBe(id);
+  });
+
+  it("admin can update a template (bumps version)", async () => {
+    const created = await adminAgent.post("/api/admin/workflow-templates").send(makeTemplate());
+    const id = created.body.template._id;
+    const res = await adminAgent.put(`/api/admin/workflow-templates/${id}`).send({
+      stages: [
+        { name: "Updated Stage", assigneeRole: "faculty", allowedActions: ["approve", "reject"], slaHours: 12 },
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.template.version).toBe(2);
+    expect(res.body.template.stages).toHaveLength(1);
+  });
+
+  it("admin can deactivate a template", async () => {
+    const created = await adminAgent.post("/api/admin/workflow-templates").send(makeTemplate());
+    const id = created.body.template._id;
+    const res = await adminAgent.patch(`/api/admin/workflow-templates/${id}/deactivate`);
+    expect(res.status).toBe(200);
+    expect(res.body.template.isActive).toBe(false);
+  });
+
+  it("admin can activate a template", async () => {
+    const created = await adminAgent.post("/api/admin/workflow-templates").send(
+      makeTemplate({ isActive: false })
+    );
+    const id = created.body.template._id;
+    const res = await adminAgent.patch(`/api/admin/workflow-templates/${id}/activate`);
+    expect(res.status).toBe(200);
+    expect(res.body.template.isActive).toBe(true);
+  });
+
+  it("non-admin cannot create a template (403)", async () => {
+    const res = await studentAgent.post("/api/admin/workflow-templates").send(makeTemplate());
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 400 when stages array is empty", async () => {
+    const res = await adminAgent.post("/api/admin/workflow-templates").send(
+      makeTemplate({ stages: [] })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when stage has no allowedActions", async () => {
+    const res = await adminAgent.post("/api/admin/workflow-templates").send(
+      makeTemplate({ stages: [{ name: "S1", assigneeRole: "faculty", allowedActions: [] }] })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 404 for non-existent template id", async () => {
+    const fakeId = new mongoose.Types.ObjectId();
+    const res = await adminAgent.get(`/api/admin/workflow-templates/${fakeId}`);
+    expect(res.status).toBe(404);
+  });
+});
+
+// ── WorkflowEngine service unit tests ────────────────────────────────────────
+
+describe("WorkflowEngine service", () => {
+  let adminUser;
+  let facultyUser;
+  let hodUser;
+  let studentUser;
+
+  beforeEach(async () => {
+    studentUser = await User.create({ name: "S", email: "s@wf.com", password: "x", role: "student" });
+    facultyUser = await User.create({ name: "F", email: "f@wf.com", password: "x", role: "faculty" });
+    hodUser     = await User.create({ name: "H", email: "h@wf.com", password: "x", role: "hod" });
+    adminUser   = await User.create({ name: "A", email: "a@wf.com", password: "x", role: "admin" });
+  });
+
+  it("createInstance() snapshots template stages correctly", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    expect(instance.stages).toHaveLength(2);
+    expect(instance.stages[0].stageName).toBe("Faculty Review");
+    expect(instance.stages[1].stageName).toBe("HOD Approval");
+    expect(instance.stages[0].status).toBe("in_progress");
+    expect(instance.stages[1].status).toBe("pending");
+    expect(instance.currentStageIndex).toBe(0);
+    expect(instance.overallStatus).toBe("in_progress");
+    expect(instance.templateSnapshot.version).toBe(1);
+  });
+
+  it("createInstance() sets slaDeadline on first stage", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+    expect(instance.stages[0].slaDeadline).not.toBeNull();
+    expect(instance.stages[1].slaDeadline).toBeNull();
+  });
+
+  it("advanceStage() moves to next stage on approve", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    const { instance: updated, advancedTo } = await workflowSvc.advanceStage(
+      instance._id, "approve", facultyUser._id, ""
+    );
+
+    expect(updated.currentStageIndex).toBe(1);
+    expect(updated.overallStatus).toBe("in_progress");
+    expect(updated.stages[0].status).toBe("completed");
+    expect(updated.stages[1].status).toBe("in_progress");
+    expect(advancedTo).toBe("HOD Approval");
+  });
+
+  it("advanceStage() approves whole workflow on last stage approve", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    // Advance stage 1
+    await workflowSvc.advanceStage(instance._id, "approve", facultyUser._id, "");
+    // Advance stage 2 (requires comment)
+    const { instance: final } = await workflowSvc.advanceStage(
+      instance._id, "approve", hodUser._id, "Looks good"
+    );
+
+    expect(final.overallStatus).toBe("approved");
+    expect(final.stages[1].status).toBe("completed");
+  });
+
+  it("advanceStage() rejects entire workflow on reject", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    const { instance: rejected } = await workflowSvc.advanceStage(
+      instance._id, "reject", facultyUser._id, "Not valid"
+    );
+
+    expect(rejected.overallStatus).toBe("rejected");
+    expect(rejected.stages[0].status).toBe("completed");
+    expect(rejected.stages[1].status).toBe("skipped");
+  });
+
+  it("advanceStage() returns 400 for action not in allowedActions", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    await expect(
+      workflowSvc.advanceStage(instance._id, "close", facultyUser._id, "")
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("advanceStage() enforces requiresComment", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    // Advance to stage 2 (requiresComment=true)
+    await workflowSvc.advanceStage(instance._id, "approve", facultyUser._id, "");
+    await expect(
+      workflowSvc.advanceStage(instance._id, "approve", hodUser._id, "")
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("advanceStage() returns 403 when role doesn't match stage", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    // Stage 0 requires faculty — try with HOD user acting directly (should be 403 since hod !== faculty)
+    // Note: HOD has a different role string — this should fail the role check
+    await expect(
+      workflowSvc.advanceStage(instance._id, "approve", studentUser._id, "")
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("admin can always advance any stage regardless of role", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    // Admin acting at faculty stage — should succeed
+    const { instance: updated } = await workflowSvc.advanceStage(
+      instance._id, "approve", adminUser._id, ""
+    );
+    expect(updated.currentStageIndex).toBe(1);
+  });
+
+  it("advanceStage() throws 409 on terminal instance", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate({ stages: [
+      { order: 1, name: "One", assigneeRole: "faculty", allowedActions: ["approve"], slaHours: 0 },
+    ]}));
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+    await workflowSvc.advanceStage(instance._id, "approve", facultyUser._id, "");
+
+    await expect(
+      workflowSvc.advanceStage(instance._id, "approve", facultyUser._id, "")
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("findActiveTemplate() returns null when no template configured", async () => {
+    const result = await workflowSvc.findActiveTemplate("request", "transcript");
+    expect(result).toBeNull();
+  });
+
+  it("findActiveTemplate() returns matching active template", async () => {
+    await WorkflowTemplate.create(makeTemplate({ appliesToTypes: ["grade_appeal"] }));
+    const result = await workflowSvc.findActiveTemplate("request", "grade_appeal");
+    expect(result).not.toBeNull();
+    expect(result.name).toBe("Test Workflow");
+  });
+
+  it("getWorkflowStatus() returns null when no instance", async () => {
+    const result = await workflowSvc.getWorkflowStatus(new mongoose.Types.ObjectId(), "request");
+    expect(result).toBeNull();
+  });
+
+  it("getWorkflowStatus() returns instance summary", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+    const status = await workflowSvc.getWorkflowStatus(entityId, "request");
+    expect(status.overallStatus).toBe("in_progress");
+    expect(status.currentStageIndex).toBe(0);
+    expect(status.stages).toHaveLength(2);
+  });
+
+  it("checkSLABreaches() marks overdue stage as slaBreached", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    // Manually set slaDeadline to the past
+    await WorkflowInstance.findByIdAndUpdate(instance._id, {
+      "stages.0.slaDeadline": new Date(Date.now() - 1000),
+    });
+
+    const stats = await workflowSvc.checkSLABreaches();
+    expect(stats.breached).toBeGreaterThanOrEqual(1);
+  });
+
+  it("version bump on template update does not affect existing instance", async () => {
+    const tpl = await WorkflowTemplate.create(makeTemplate());
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId, "request", tpl._id, studentUser._id);
+
+    // Bump template version
+    tpl.version = 2;
+    tpl.stages[0].name = "Updated Stage Name";
+    await tpl.save();
+
+    // Instance snapshot is unchanged
+    const reloaded = await WorkflowInstance.findById(instance._id);
+    expect(reloaded.templateSnapshot.version).toBe(1);
+    expect(reloaded.stages[0].stageName).toBe("Faculty Review");
+  });
+});
+
+// ── Integration: POST /api/requests auto-creates workflow instance ────────────
+
+describe("Integration: Request submission with workflow template", () => {
+  let studentAgent;
+  let facultyAgent;
+  let adminAgent;
+
+  beforeEach(async () => {
+    studentAgent = request.agent(app);
+    facultyAgent = request.agent(app);
+    adminAgent   = request.agent(app);
+
+    await studentAgent.post("/api/register").send({ name: "St", email: "st@wf2.com", password: "pass1234" });
+    await studentAgent.post("/api/login").send({ email: "st@wf2.com", password: "pass1234" });
+
+    await facultyAgent.post("/api/register").send({ name: "Fa", email: "fa@wf2.com", password: "pass1234" });
+    await User.updateOne({ email: "fa@wf2.com" }, { role: "faculty" });
+    await facultyAgent.post("/api/login").send({ email: "fa@wf2.com", password: "pass1234" });
+
+    await adminAgent.post("/api/register").send({ name: "Ad", email: "ad@wf2.com", password: "pass1234" });
+    await User.updateOne({ email: "ad@wf2.com" }, { role: "admin" });
+    await adminAgent.post("/api/login").send({ email: "ad@wf2.com", password: "pass1234" });
+  });
+
+  it("creates a WorkflowInstance when active template exists for type", async () => {
+    await adminAgent.post("/api/admin/workflow-templates").send(
+      makeTemplate({ appliesToTypes: ["general"] })
+    );
+
+    const res = await studentAgent.post("/api/requests").send({
+      type: "general", description: "I need help with my enrollment", priority: "normal",
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.request.workflowInstanceId).toBeTruthy();
+  });
+
+  it("does NOT create WorkflowInstance when no template configured", async () => {
+    const res = await studentAgent.post("/api/requests").send({
+      type: "transcript", description: "Need official transcript", priority: "normal",
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.request.workflowInstanceId).toBeFalsy();
+  });
+
+  it("GET /api/requests/:id/workflow returns 404 when no instance", async () => {
+    const req = await studentAgent.post("/api/requests").send({
+      type: "transcript", description: "Test desc", priority: "low",
+    });
+    const id = req.body.request._id;
+    const res = await studentAgent.get(`/api/requests/${id}/workflow`);
+    expect(res.status).toBe(404);
+  });
+
+  it("faculty can advance workflow stage via POST /api/requests/:id/workflow/advance", async () => {
+    await adminAgent.post("/api/admin/workflow-templates").send(
+      makeTemplate({ appliesToTypes: ["general"] })
+    );
+
+    const reqRes = await studentAgent.post("/api/requests").send({
+      type: "general", description: "Advance me through workflow", priority: "normal",
+    });
+    const id = reqRes.body.request._id;
+
+    const adv = await facultyAgent.post(`/api/requests/${id}/workflow/advance`).send({
+      action: "approve", comment: "Looks good",
+    });
+    expect(adv.status).toBe(200);
+    expect(adv.body.overallStatus).toBe("in_progress");
+    expect(adv.body.advancedTo).toBe("HOD Approval");
+  });
+
+  it("student cannot advance workflow stage (403)", async () => {
+    await adminAgent.post("/api/admin/workflow-templates").send(
+      makeTemplate({ appliesToTypes: ["general"] })
+    );
+    const reqRes = await studentAgent.post("/api/requests").send({
+      type: "general", description: "Student tries to advance", priority: "normal",
+    });
+    const id = reqRes.body.request._id;
+
+    const adv = await studentAgent.post(`/api/requests/${id}/workflow/advance`).send({
+      action: "approve",
+    });
+    expect(adv.status).toBe(403);
+  });
+
+  it("student cannot view another student's workflow (404)", async () => {
+    await adminAgent.post("/api/admin/workflow-templates").send(
+      makeTemplate({ appliesToTypes: ["general"] })
+    );
+    const reqRes = await studentAgent.post("/api/requests").send({
+      type: "general", description: "Private request", priority: "normal",
+    });
+    const id = reqRes.body.request._id;
+
+    const student2 = request.agent(app);
+    await student2.post("/api/register").send({ name: "S2", email: "s2@wf2.com", password: "pass1234" });
+    await student2.post("/api/login").send({ email: "s2@wf2.com", password: "pass1234" });
+
+    const res = await student2.get(`/api/requests/${id}/workflow`);
+    expect(res.status).toBe(404);
+  });
+
+  it("legacy PATCH /api/requests/:id/status still works without workflow", async () => {
+    const reqRes = await studentAgent.post("/api/requests").send({
+      type: "transcript", description: "Legacy status test", priority: "normal",
+    });
+    const id = reqRes.body.request._id;
+
+    const patch = await facultyAgent.patch(`/api/requests/${id}/status`).send({
+      status: "in_review",
+    });
+    expect(patch.status).toBe(200);
+    expect(patch.body.request.status).toBe("in_review");
+  });
+
+  it("GET /api/config/request-types returns all types", async () => {
+    const res = await studentAgent.get("/api/config/request-types");
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.requestTypes)).toBe(true);
+    expect(res.body.requestTypes.length).toBeGreaterThan(0);
+  });
+
+  it("GET /api/config/priorities returns priorities with slaHours", async () => {
+    const res = await studentAgent.get("/api/config/priorities");
+    expect(res.status).toBe(200);
+    expect(res.body.priorities.find((p) => p.value === "urgent").slaHours).toBe(4);
+  });
+
+  it("GET /api/config/workflow-templates returns active templates", async () => {
+    await adminAgent.post("/api/admin/workflow-templates").send(
+      makeTemplate({ appliesToTypes: ["general"] })
+    );
+    const res = await studentAgent.get("/api/config/workflow-templates");
+    expect(res.status).toBe(200);
+    expect(res.body.templates.length).toBeGreaterThanOrEqual(1);
+  });
+});

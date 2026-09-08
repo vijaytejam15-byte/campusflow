@@ -20,6 +20,9 @@ const requestRoutes   = require("./routes/requests.routes");
 const adminRoutes     = require("./routes/admin.routes");
 const leaveRoutes     = require("./routes/leave.routes");
 const leaveTypeRoutes = require("./routes/leaveType.routes");
+// ── Workflow engine routes (additive) ─────────────────────────────────────────
+const workflowInstanceRoutes = require("./routes/workflowInstance.routes");
+const configRoutes           = require("./routes/config.routes");
 
 const { initSocket }     = require("./socket/socketHandler");
 const { startEscalationJob } = require("./jobs/escalation.job");
@@ -57,7 +60,7 @@ app.use(helmet({
       scriptSrc:  ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net"],
       styleSrc:   ["'self'", "'unsafe-inline'", "fonts.googleapis.com"],
       imgSrc:     ["'self'", "data:", "cdn.jsdelivr.net"],
-      fontSrc:    ["'self'", "fonts.gstatic.com"],
+      fontSrc:    ["'self'", "fonts.gstatic.com"], 
       connectSrc: ["'self'"],
     },
   },
@@ -140,6 +143,9 @@ app.use("/api/requests",    requestRoutes);
 app.use("/api/admin",       adminRoutes);
 app.use("/api/leave",       leaveRoutes);
 app.use("/api/leave-types", leaveTypeRoutes);
+// ── Workflow engine (additive) ────────────────────────────────────────────────
+app.use("/api",             workflowInstanceRoutes);
+app.use("/api/config",      configRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
