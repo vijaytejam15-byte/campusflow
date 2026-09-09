@@ -112,6 +112,43 @@ router.post("/", requireAuth, async (req, res, next) => {
         message: `Supporting document is required for "${leaveType.name}"`,
       });
 
+    // ── Quota enforcement ────────────────────────────────────────────────────
+    // Only applies when maxDaysPerYear > 0
+    if (leaveType.maxDaysPerYear > 0) {
+      // Academic year: Aug 1 of current year → Jul 31 of next year
+      const now       = new Date();
+      const yearStart = now.getMonth() >= 7               // Aug = index 7
+        ? new Date(now.getFullYear(), 7, 1)                // Aug 1 this year
+        : new Date(now.getFullYear() - 1, 7, 1);           // Aug 1 last year
+      const yearEnd   = new Date(yearStart.getFullYear() + 1, 7, 1); // Aug 1 next year
+
+      // Count days already used (approved + pending) for this leave type this year
+      const usedAgg = await Leave.aggregate([
+        {
+          $match: {
+            student:   new mongoose.Types.ObjectId(req.userId),
+            leaveType: leaveType._id,
+            status:    { $in: ["approved", "pending"] },
+            startDate: { $gte: yearStart, $lt: yearEnd },
+          },
+        },
+        { $group: { _id: null, totalDays: { $sum: "$totalDays" } } },
+      ]);
+      const usedDays = usedAgg[0]?.totalDays || 0;
+
+      // Compute days for this new request
+      const requestedDays = calcLeaveDays(start, end);
+
+      if (usedDays + requestedDays > leaveType.maxDaysPerYear) {
+        const remaining = Math.max(0, leaveType.maxDaysPerYear - usedDays);
+        return res.status(400).json({
+          message: `Leave quota exceeded for "${leaveType.name}". ` +
+            `You have ${remaining} day(s) remaining out of ${leaveType.maxDaysPerYear} allowed per year. ` +
+            `You are requesting ${requestedDays} day(s).`,
+        });
+      }
+    }
+
     // Validate documents array
     let cleanDocs = [];
     if (Array.isArray(documents) && documents.length > 0) {
@@ -455,6 +492,23 @@ router.patch("/:id/cancel", requireAuth, async (req, res, next) => {
     });
     await leave.save();
 
+    // ── Restore balance for cancelled pending leave ────────────────────────
+    // (pending leaves were counted in the quota check; cancellation frees them)
+    try {
+      const leaveTypeDoc = await LeaveType.findById(leave.leaveType).select("maxDaysPerYear").lean();
+      if (leaveTypeDoc && leaveTypeDoc.maxDaysPerYear > 0) {
+        const student = await User.findById(req.userId);
+        if (student) {
+          const typeKey = leave.leaveType.toString();
+          const current = student.leaveBalance.get(typeKey) ?? leaveTypeDoc.maxDaysPerYear;
+          student.leaveBalance.set(typeKey, Math.min(leaveTypeDoc.maxDaysPerYear, current + leave.totalDays));
+          await student.save();
+        }
+      }
+    } catch (balErr) {
+      logger.warn("[Leave] Cancel balance restore failed (non-fatal)", { error: balErr.message });
+    }
+
     res.json({ message: "Application cancelled", leave });
   } catch (err) { next(err); }
 });
@@ -540,6 +594,28 @@ router.patch("/:id/review", requireAuth, requireStaff, async (req, res, next) =>
     });
 
     await leave.save();
+
+    // ── Leave balance update ──────────────────────────────────────────────────
+    try {
+      const leaveTypeDoc = await LeaveType.findById(leave.leaveType).select("maxDaysPerYear").lean();
+      if (leaveTypeDoc && leaveTypeDoc.maxDaysPerYear > 0) {
+        const student = await User.findById(leave.student);
+        if (student) {
+          const typeKey = leave.leaveType.toString();
+          const current = student.leaveBalance.get(typeKey) ?? leaveTypeDoc.maxDaysPerYear;
+          if (decision === "approved") {
+            // Decrement balance — floor at 0
+            student.leaveBalance.set(typeKey, Math.max(0, current - leave.totalDays));
+          } else if (decision === "rejected") {
+            // Restore balance (the quota check had counted this pending leave)
+            student.leaveBalance.set(typeKey, Math.min(leaveTypeDoc.maxDaysPerYear, current + leave.totalDays));
+          }
+          await student.save();
+        }
+      }
+    } catch (balErr) {
+      logger.warn("[Leave] Balance update failed (non-fatal)", { error: balErr.message });
+    }
 
     // Populate for response
     await leave.populate("student",   "name email department");

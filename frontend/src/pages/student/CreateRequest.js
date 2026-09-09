@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createRequest, REQUEST_TYPES, PRIORITIES } from "../../services/requestService";
+import { uploadFiles } from "../../api";
 import FileUploader from "../../components/shared/FileUploader";
 
 const EMPTY_FORM = {
@@ -40,12 +41,38 @@ export default function CreateRequest() {
 
     setSubmitting(true);
     try {
+      // 1. Upload any pending files first
+      let resolvedAttachments = [];
+      const pendingFiles = attachments.filter((a) => !a.uploaded && a._file);
+      const alreadyUploaded = attachments.filter((a) => a.uploaded);
+
+      if (pendingFiles.length > 0) {
+        const rawFiles = pendingFiles.map((a) => a._file);
+        const uploadResult = await uploadFiles(rawFiles);
+        const serverFiles = uploadResult.files || [];
+
+        // Mark uploaded and set server filenames
+        const nowUploaded = pendingFiles.map((a, i) => ({
+          ...a,
+          filename: serverFiles[i]?.filename || a.filename,
+          uploaded: true,
+          _file:    undefined,
+        }));
+        setAttachments([...alreadyUploaded, ...nowUploaded]);
+        resolvedAttachments = [...alreadyUploaded, ...nowUploaded];
+      } else {
+        resolvedAttachments = attachments;
+      }
+
+      // 2. Submit the request with server-confirmed filenames
       await createRequest({
         type:        form.type,
         description: form.description.trim(),
         department:  form.department.trim(),
         priority:    form.priority,
-        attachments,
+        attachments: resolvedAttachments.map(({ filename, originalName, mimeType, size }) => ({
+          filename, originalName, mimeType, size,
+        })),
       });
       navigate("/student/my-requests", {
         replace: false,

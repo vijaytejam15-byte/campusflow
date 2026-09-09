@@ -10,6 +10,12 @@ const emptyForm = {
   avatar: "",
 };
 
+const emptyPwForm = {
+  currentPassword: "",
+  newPassword:     "",
+  confirmPassword: "",
+};
+
 export default function Profile() {
   const { updateUser } = useAuth();
 
@@ -21,6 +27,13 @@ export default function Profile() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+
+  // ── Password change state ─────────────────────────────────────────────────
+  const [pwForm,      setPwForm]      = useState(emptyPwForm);
+  const [pwSaving,    setPwSaving]    = useState(false);
+  const [pwError,     setPwError]     = useState("");
+  const [pwSuccess,   setPwSuccess]   = useState("");
+  const [showPwPanel, setShowPwPanel] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,6 +72,9 @@ export default function Profile() {
 
   const update = (field) => (e) =>
     setForm((f) => ({ ...f, [field]: e.target.value }));
+
+  const updatePw = (field) => (e) =>
+    setPwForm((f) => ({ ...f, [field]: e.target.value }));
 
   const startEditing = () => {
     setError("");
@@ -110,8 +126,39 @@ export default function Profile() {
     }
   };
 
-  if (loading) {
-    return (
+  const handlePasswordChange = async (e) => {
+    e.preventDefault();
+    setPwError("");
+    setPwSuccess("");
+    if (!pwForm.currentPassword || !pwForm.newPassword || !pwForm.confirmPassword) {
+      setPwError("All password fields are required.");
+      return;
+    }
+    if (pwForm.newPassword.length < 6) {
+      setPwError("New password must be at least 6 characters.");
+      return;
+    }
+    if (pwForm.newPassword !== pwForm.confirmPassword) {
+      setPwError("New passwords do not match.");
+      return;
+    }
+    setPwSaving(true);
+    try {
+      await api.changePassword({
+        currentPassword: pwForm.currentPassword,
+        newPassword:     pwForm.newPassword,
+      });
+      setPwSuccess("Password changed successfully. Other sessions have been logged out.");
+      setPwForm(emptyPwForm);
+      setShowPwPanel(false);
+    } catch (err) {
+      setPwError(err.message || "Could not change password.");
+    } finally {
+      setPwSaving(false);
+    }
+  };
+
+  if (loading) {    return (
       <main className="cf-main">
         <div className="cf-center cf-center--inline">
           <div className="cf-spinner" aria-label="Loading profile" />
@@ -268,6 +315,83 @@ export default function Profile() {
               </button>
             </div>
           </>
+        )}
+      </article>
+
+      {/* ── Password change section ── */}
+      <article className="cf-tile" style={{ marginTop: 24 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2 className="cf-tile__title" style={{ margin: 0 }}>Change password</h2>
+          {!showPwPanel && (
+            <button className="cf-btn cf-btn--ghost" onClick={() => { setShowPwPanel(true); setPwError(""); setPwSuccess(""); }}>
+              Change password
+            </button>
+          )}
+        </div>
+
+        {pwSuccess && (
+          <div className="cf-alert cf-alert--success" role="status" style={{ marginTop: 12 }}>
+            {pwSuccess}
+          </div>
+        )}
+
+        {showPwPanel && (
+          <form onSubmit={handlePasswordChange} noValidate style={{ marginTop: 16 }}>
+            {pwError && (
+              <div className="cf-alert cf-alert--error" role="alert">{pwError}</div>
+            )}
+            <label className="cf-field">
+              <span className="cf-label">Current password</span>
+              <input
+                type="password"
+                className="cf-input"
+                value={pwForm.currentPassword}
+                onChange={updatePw("currentPassword")}
+                autoComplete="current-password"
+                required
+                disabled={pwSaving}
+              />
+            </label>
+            <label className="cf-field">
+              <span className="cf-label">New password</span>
+              <input
+                type="password"
+                className="cf-input"
+                value={pwForm.newPassword}
+                onChange={updatePw("newPassword")}
+                autoComplete="new-password"
+                minLength={6}
+                required
+                disabled={pwSaving}
+              />
+              <span className="cf-hint">Minimum 6 characters.</span>
+            </label>
+            <label className="cf-field">
+              <span className="cf-label">Confirm new password</span>
+              <input
+                type="password"
+                className="cf-input"
+                value={pwForm.confirmPassword}
+                onChange={updatePw("confirmPassword")}
+                autoComplete="new-password"
+                required
+                disabled={pwSaving}
+              />
+            </label>
+            <div className="cf-form-actions">
+              <button
+                type="button"
+                className="cf-btn cf-btn--ghost"
+                onClick={() => { setShowPwPanel(false); setPwForm(emptyPwForm); setPwError(""); }}
+                disabled={pwSaving}
+              >
+                Cancel
+              </button>
+              <button type="submit" className="cf-btn cf-btn--auto" disabled={pwSaving}>
+                {pwSaving ? "Saving…" : "Update password"}
+              </button>
+            </div>
+          </form>
         )}
       </article>
     </main>

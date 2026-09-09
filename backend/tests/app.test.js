@@ -1418,11 +1418,13 @@ describe("GET /api/files/:key", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns 404 for authenticated request with nonexistent file", async () => {
+  it("returns 403 or 404 for authenticated request with nonexistent file", async () => {
     const agent = request.agent(app);
     await registerAndGetCookie(agent);
     const res = await agent.get("/api/files/nonexistent-file-uuid.pdf");
-    expect(res.status).toBe(404);
+    // 403 = no ownership record for this key (correct new behaviour)
+    // 404 = file key found in ownership but not on disk (also valid)
+    expect([403, 404]).toContain(res.status);
   });
 });
 
@@ -2063,5 +2065,610 @@ describe("Integration: Request submission with workflow template", () => {
     const res = await studentAgent.get("/api/config/workflow-templates");
     expect(res.status).toBe(200);
     expect(res.body.templates.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP-FIX TESTS: File Upload, Leave Quota, Departments, Password Change, Advisor
+// ─────────────────────────────────────────────────────────────────────────────
+
+const path = require("path");
+const fs   = require("fs");
+const LeaveType  = require("../models/LeaveType");
+const Leave      = require("../models/Leave");
+const Department = require("../models/Department");
+
+// ── Shared helpers for gap tests ──────────────────────────────────────────────
+
+async function makeStudentAgent(email = "gapst@test.com", name = "GapStudent") {
+  const ag = request.agent(app);
+  const r  = await ag.post("/api/register").send({ name, email, password: "pass1234" });
+  expect(r.status).toBe(201);
+  return { agent: ag, userId: r.body.user.id };
+}
+
+async function makeStaffAgent(role = "faculty", email = "gapfac@test.com", name = "GapFaculty") {
+  const ag = request.agent(app);
+  const r  = await ag.post("/api/register").send({ name, email, password: "pass1234" });
+  expect(r.status).toBe(201);
+  await User.findByIdAndUpdate(r.body.user.id, { role });
+  await ag.post("/api/login").send({ email, password: "pass1234" });
+  return { agent: ag, userId: r.body.user.id };
+}
+
+async function makeAdminAgent2(email = "gapadm@test.com") {
+  const ag = request.agent(app);
+  const r  = await ag.post("/api/register").send({ name: "GapAdmin", email, password: "pass1234" });
+  expect(r.status).toBe(201);
+  await User.findByIdAndUpdate(r.body.user.id, { role: "admin" });
+  await ag.post("/api/login").send({ email, password: "pass1234" });
+  return { agent: ag, userId: r.body.user.id };
+}
+
+// ── Fixture: future date strings ──────────────────────────────────────────────
+function futureDate(daysFromNow) {
+  const d = new Date();
+  d.setDate(d.getDate() + daysFromNow);
+  return d.toISOString().split("T")[0];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP 1 — File Upload pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("POST /api/upload — file upload endpoint", () => {
+  it("returns 401 for unauthenticated request", async () => {
+    const res = await request(app).post("/api/upload").attach("documents", Buffer.from("hi"), "test.txt");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when no files attached", async () => {
+    const { agent } = await makeStudentAgent("up1@test.com");
+    const res = await agent.post("/api/upload");
+    expect(res.status).toBe(400);
+  });
+
+  it("uploads a text file and returns metadata", async () => {
+    const { agent } = await makeStudentAgent("up2@test.com");
+    const res = await agent
+      .post("/api/upload")
+      .attach("documents", Buffer.from("hello upload"), "sample.txt");
+    expect(res.status).toBe(201);
+    expect(res.body.files).toHaveLength(1);
+    expect(res.body.files[0].originalName).toBe("sample.txt");
+    expect(res.body.files[0].filename).toBeDefined();
+    expect(res.body.files[0].mimeType).toBe("text/plain");
+    expect(res.body.files[0].size).toBeGreaterThan(0);
+
+    // Cleanup
+    const { UPLOAD_DIR } = require("../middleware/upload");
+    const p = path.join(UPLOAD_DIR, res.body.files[0].filename);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  });
+
+  it("rejects a disallowed file type", async () => {
+    const { agent } = await makeStudentAgent("up3@test.com");
+    const res = await agent
+      .post("/api/upload")
+      .attach("documents", Buffer.from("<html>"), { filename: "bad.html", contentType: "text/html" });
+    expect(res.status).toBe(400);
+  });
+
+  it("uploaded file actually exists on disk", async () => {
+    const { agent } = await makeStudentAgent("up4@test.com");
+    const res = await agent
+      .post("/api/upload")
+      .attach("documents", Buffer.from("disk check"), "disk.txt");
+    expect(res.status).toBe(201);
+    const { UPLOAD_DIR } = require("../middleware/upload");
+    const filePath = path.join(UPLOAD_DIR, res.body.files[0].filename);
+    expect(fs.existsSync(filePath)).toBe(true);
+    fs.unlinkSync(filePath);
+  });
+
+  it("can upload multiple files at once", async () => {
+    const { agent } = await makeStudentAgent("up5@test.com");
+    const res = await agent
+      .post("/api/upload")
+      .attach("documents", Buffer.from("file one"), "one.txt")
+      .attach("documents", Buffer.from("file two"), "two.txt");
+    expect(res.status).toBe(201);
+    expect(res.body.files).toHaveLength(2);
+    const { UPLOAD_DIR } = require("../middleware/upload");
+    res.body.files.forEach((f) => {
+      const p = path.join(UPLOAD_DIR, f.filename);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    });
+  });
+});
+
+describe("GET /api/files/:key — file download authorization", () => {
+  let uploadedKey;
+  let studentAgent;
+
+  beforeEach(async () => {
+    const s = await makeStudentAgent("dl1@test.com");
+    studentAgent = s.agent;
+    // Upload a file
+    const up = await studentAgent
+      .post("/api/upload")
+      .attach("documents", Buffer.from("download test"), "dl.txt");
+    expect(up.status).toBe(201);
+    uploadedKey = up.body.files[0].filename;
+    // Attach it to a request so ownership is recorded
+    await studentAgent.post("/api/requests").send({
+      type: "general",
+      description: "Request with attachment for download test",
+      priority: "normal",
+      attachments: [{ filename: uploadedKey, originalName: "dl.txt", mimeType: "text/plain", size: 13 }],
+    });
+  });
+
+  afterEach(async () => {
+    const { UPLOAD_DIR } = require("../middleware/upload");
+    const p = path.join(UPLOAD_DIR, uploadedKey);
+    if (uploadedKey && fs.existsSync(p)) fs.unlinkSync(p);
+  });
+
+  it("returns 401 for unauthenticated download", async () => {
+    const res = await request(app).get(`/api/files/${uploadedKey}`);
+    expect(res.status).toBe(401);
+  });
+
+  it("owner can download their own file", async () => {
+    const res = await studentAgent.get(`/api/files/${uploadedKey}`);
+    expect(res.status).toBe(200);
+  });
+
+  it("different student cannot download another student's file (403)", async () => {
+    const { agent: other } = await makeStudentAgent("dl2@test.com", "Other");
+    const res = await other.get(`/api/files/${uploadedKey}`);
+    expect(res.status).toBe(403);
+  });
+
+  it("faculty reviewer can download any file", async () => {
+    const { agent: fac } = await makeStaffAgent("faculty", "dl3fac@test.com");
+    const res = await fac.get(`/api/files/${uploadedKey}`);
+    expect(res.status).toBe(200);
+  });
+
+  it("returns 404 for nonexistent file key (authenticated)", async () => {
+    const res = await studentAgent.get("/api/files/nonexistent-uuid-xyz.txt");
+    // Either 403 (no ownership record) or 404 (not found) — both acceptable
+    expect([403, 404]).toContain(res.status);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP 2 — Leave Quota / Balance enforcement
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Leave quota enforcement", () => {
+  let studentAgent, studentId;
+  let facultyAgent;
+  let leaveTypeId;
+
+  beforeEach(async () => {
+    const s = await makeStudentAgent("lq1@test.com", "QuotaStudent");
+    studentAgent = s.agent;
+    studentId    = s.userId;
+    const f = await makeStaffAgent("faculty", "lqfac@test.com");
+    facultyAgent = f.agent;
+
+    // Create a leave type with a 3-day annual quota
+    const lt = await LeaveType.create({
+      name:           "Quota Leave " + Date.now(),
+      maxDaysPerYear: 3,
+      isActive:       true,
+    });
+    leaveTypeId = lt._id.toString();
+  });
+
+  it("allows leave when within quota (2 working days)", async () => {
+    // Mon–Tue (2 working days)
+    const start = futureDate(7);  // pick a future Monday
+    const end   = futureDate(8);
+    const res = await studentAgent.post("/api/leave").send({
+      leaveTypeId,
+      startDate: start,
+      endDate:   end,
+      reason:    "Need some rest this week",
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("rejects leave when requested days exceed quota", async () => {
+    // 5 working days on a 3-day quota
+    const start = futureDate(7);
+    const end   = futureDate(13); // Mon–Fri next week = 5 working days
+    const res = await studentAgent.post("/api/leave").send({
+      leaveTypeId,
+      startDate: start,
+      endDate:   end,
+      reason:    "Need a full week off for personal reasons",
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/quota exceeded/i);
+  });
+
+  it("counts existing pending leave toward quota", async () => {
+    // Apply for 2 days (within 3-day quota)
+    await studentAgent.post("/api/leave").send({
+      leaveTypeId,
+      startDate: futureDate(14),
+      endDate:   futureDate(15),
+      reason:    "First application reason here",
+    });
+
+    // Try to apply for 2 more days — total 4 > quota 3
+    const res = await studentAgent.post("/api/leave").send({
+      leaveTypeId,
+      startDate: futureDate(21),
+      endDate:   futureDate(22),
+      reason:    "Second application needs to be blocked",
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/quota exceeded/i);
+  });
+
+  it("quota is NOT enforced when maxDaysPerYear is 0 (unlimited)", async () => {
+    const unlimited = await LeaveType.create({
+      name:           "Unlimited Leave " + Date.now(),
+      maxDaysPerYear: 0,
+      isActive:       true,
+    });
+    // 10 working days — should succeed with no quota
+    const res = await studentAgent.post("/api/leave").send({
+      leaveTypeId: unlimited._id.toString(),
+      startDate:   futureDate(7),
+      endDate:     futureDate(18),
+      reason:      "Extended leave, no quota limit applies here",
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("approval decrements student leaveBalance", async () => {
+    const lt = await LeaveType.create({
+      name:           "Balance Leave " + Date.now(),
+      maxDaysPerYear: 10,
+      isActive:       true,
+    });
+    const start = futureDate(28);
+    const end   = futureDate(29); // 2 working days
+    await studentAgent.post("/api/leave").send({
+      leaveTypeId: lt._id.toString(),
+      startDate:   start,
+      endDate:     end,
+      reason:      "Checking balance decrement after approval",
+    });
+    const leaveDoc = await Leave.findOne({ student: studentId }).lean();
+    expect(leaveDoc).toBeTruthy();
+
+    await facultyAgent.patch(`/api/leave/${leaveDoc._id}/review`).send({
+      decision: "approved", comment: "Approved fine",
+    });
+
+    const updated = await User.findById(studentId).lean();
+    const bal = updated.leaveBalance instanceof Map
+      ? updated.leaveBalance.get(lt._id.toString())
+      : updated.leaveBalance?.[lt._id.toString()];
+    // Balance should be less than max (decremented)
+    expect(bal).toBeLessThan(lt.maxDaysPerYear);
+  });
+
+  it("rejection does NOT decrease leave balance below max", async () => {
+    const lt = await LeaveType.create({
+      name:           "Reject Balance " + Date.now(),
+      maxDaysPerYear: 5,
+      isActive:       true,
+    });
+    await studentAgent.post("/api/leave").send({
+      leaveTypeId: lt._id.toString(),
+      startDate:   futureDate(35),
+      endDate:     futureDate(36),
+      reason:      "This should be rejected and balance restored",
+    });
+    const leaveDoc = await Leave.findOne({ student: studentId, leaveType: lt._id }).lean();
+    await facultyAgent.patch(`/api/leave/${leaveDoc._id}/review`).send({
+      decision: "rejected", comment: "Not approved due to policy",
+    });
+    // After rejection the balance should NOT be less than 0 and not permanently decremented
+    const updated = await User.findById(studentId).lean();
+    const bal = updated.leaveBalance instanceof Map
+      ? updated.leaveBalance.get(lt._id.toString())
+      : updated.leaveBalance?.[lt._id.toString()];
+    // balance is restored/untouched — at or above initial
+    expect(bal === undefined || bal >= 5).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP 3 — Department persistence
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Department API — CRUD", () => {
+  let adminAgent;
+
+  beforeEach(async () => {
+    const a = await makeAdminAgent2("deptadm@test.com");
+    adminAgent = a.agent;
+  });
+
+  it("admin can create a department", async () => {
+    const res = await adminAgent.post("/api/admin/departments").send({
+      name: "Dept Computer Science " + Date.now(),
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.department.name).toMatch(/Computer Science/);
+    expect(res.body.department._id).toBeDefined();
+  });
+
+  it("returns 409 on duplicate department name", async () => {
+    const name = "Dup Dept " + Date.now();
+    await adminAgent.post("/api/admin/departments").send({ name });
+    const res = await adminAgent.post("/api/admin/departments").send({ name });
+    expect(res.status).toBe(409);
+  });
+
+  it("returns 400 when name is missing", async () => {
+    const res = await adminAgent.post("/api/admin/departments").send({ name: "  " });
+    expect(res.status).toBe(400);
+  });
+
+  it("GET /api/admin/departments returns created departments", async () => {
+    const name = "List Dept " + Date.now();
+    await adminAgent.post("/api/admin/departments").send({ name });
+    const res = await adminAgent.get("/api/admin/departments");
+    expect(res.status).toBe(200);
+    expect(res.body.departments.some((d) => d.name === name)).toBe(true);
+  });
+
+  it("admin can update a department name", async () => {
+    const cr = await adminAgent.post("/api/admin/departments").send({ name: "OldName " + Date.now() });
+    const id  = cr.body.department._id;
+    const newName = "NewName " + Date.now();
+    const res = await adminAgent.patch(`/api/admin/departments/${id}`).send({ name: newName });
+    expect(res.status).toBe(200);
+    expect(res.body.department.name).toBe(newName);
+  });
+
+  it("admin can deactivate a department", async () => {
+    const cr  = await adminAgent.post("/api/admin/departments").send({ name: "DeactDept " + Date.now() });
+    const id  = cr.body.department._id;
+    const res = await adminAgent.patch(`/api/admin/departments/${id}/deactivate`);
+    expect(res.status).toBe(200);
+    expect(res.body.department.isActive).toBe(false);
+  });
+
+  it("admin can re-activate a department", async () => {
+    const cr  = await adminAgent.post("/api/admin/departments").send({ name: "ReactDept " + Date.now() });
+    const id  = cr.body.department._id;
+    await adminAgent.patch(`/api/admin/departments/${id}/deactivate`);
+    const res = await adminAgent.patch(`/api/admin/departments/${id}/activate`);
+    expect(res.status).toBe(200);
+    expect(res.body.department.isActive).toBe(true);
+  });
+
+  it("admin can delete a department with no members", async () => {
+    const cr  = await adminAgent.post("/api/admin/departments").send({ name: "DelDept " + Date.now() });
+    const id  = cr.body.department._id;
+    const res = await adminAgent.delete(`/api/admin/departments/${id}`);
+    expect(res.status).toBe(200);
+    // Confirm it's gone
+    const check = await Department.findById(id);
+    expect(check).toBeNull();
+  });
+
+  it("returns 409 when deleting a department with assigned users", async () => {
+    const name = "OccupiedDept " + Date.now();
+    const cr   = await adminAgent.post("/api/admin/departments").send({ name });
+    const id   = cr.body.department._id;
+    // Assign a user to this department
+    await User.create({ name: "Occ", email: `occ${Date.now()}@t.com`, password: "x", department: name });
+    const res = await adminAgent.delete(`/api/admin/departments/${id}`);
+    expect(res.status).toBe(409);
+  });
+
+  it("non-admin cannot create a department (403)", async () => {
+    const { agent } = await makeStudentAgent("deptst@test.com");
+    const res = await agent.post("/api/admin/departments").send({ name: "Hacker Dept" });
+    expect(res.status).toBe(403);
+  });
+
+  it("GET includes memberCount for departments", async () => {
+    const name = "MemberCount " + Date.now();
+    await adminAgent.post("/api/admin/departments").send({ name });
+    // Assign a user to it
+    await User.create({ name: "Mem", email: `mem${Date.now()}@t.com`, password: "x", department: name });
+    const res = await adminAgent.get("/api/admin/departments?all=true");
+    expect(res.status).toBe(200);
+    const dept = res.body.departments.find((d) => d.name === name);
+    expect(dept).toBeDefined();
+    expect(dept.memberCount).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP 4 — Password change
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("POST /api/change-password", () => {
+  it("allows authenticated user to change password", async () => {
+    const { agent } = await makeStudentAgent("pw1@test.com");
+    const res = await agent.post("/api/change-password").send({
+      currentPassword: "pass1234",
+      newPassword:     "newpass999",
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.message).toMatch(/changed/i);
+  });
+
+  it("can log in with the new password after change", async () => {
+    const email = "pw2@test.com";
+    const { agent } = await makeStudentAgent(email);
+    await agent.post("/api/change-password").send({
+      currentPassword: "pass1234",
+      newPassword:     "brand_new_pw!",
+    });
+    // Log in fresh with new password
+    const loginRes = await request(app).post("/api/login").send({ email, password: "brand_new_pw!" });
+    expect(loginRes.status).toBe(200);
+  });
+
+  it("cannot log in with old password after change", async () => {
+    const email = "pw3@test.com";
+    const { agent } = await makeStudentAgent(email);
+    await agent.post("/api/change-password").send({
+      currentPassword: "pass1234",
+      newPassword:     "changed_pw_456",
+    });
+    const loginRes = await request(app).post("/api/login").send({ email, password: "pass1234" });
+    expect(loginRes.status).toBe(401);
+  });
+
+  it("returns 401 for wrong current password", async () => {
+    const { agent } = await makeStudentAgent("pw4@test.com");
+    const res = await agent.post("/api/change-password").send({
+      currentPassword: "WRONG_PASSWORD",
+      newPassword:     "newpass999",
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when new password is too short", async () => {
+    const { agent } = await makeStudentAgent("pw5@test.com");
+    const res = await agent.post("/api/change-password").send({
+      currentPassword: "pass1234",
+      newPassword:     "abc",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when new password equals current password", async () => {
+    const { agent } = await makeStudentAgent("pw6@test.com");
+    const res = await agent.post("/api/change-password").send({
+      currentPassword: "pass1234",
+      newPassword:     "pass1234",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when fields are missing", async () => {
+    const { agent } = await makeStudentAgent("pw7@test.com");
+    const res = await agent.post("/api/change-password").send({ currentPassword: "pass1234" });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 401 for unauthenticated request", async () => {
+    const res = await request(app).post("/api/change-password").send({
+      currentPassword: "pass1234",
+      newPassword:     "newpass999",
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("invalidates refresh tokens of other sessions after password change", async () => {
+    const email = "pw8@test.com";
+    // Session A — will change password
+    const sessionA = request.agent(app);
+    await sessionA.post("/api/register").send({ name: "PW8", email, password: "pass1234" });
+
+    // Session B — a second login
+    const sessionB = request.agent(app);
+    await sessionB.post("/api/login").send({ email, password: "pass1234" });
+
+    // Session A changes password
+    await sessionA.post("/api/change-password").send({
+      currentPassword: "pass1234",
+      newPassword:     "newsession_pw",
+    });
+
+    // Session B's refresh token should be gone — /api/refresh should 401
+    const refreshRes = await sessionB.post("/api/refresh");
+    expect(refreshRes.status).toBe(401);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAP 5 — Advisor assignment
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("PATCH /api/admin/users/:id/advisor", () => {
+  let adminAgent, studentId, facultyId;
+
+  beforeEach(async () => {
+    const a = await makeAdminAgent2("avadm@test.com");
+    adminAgent = a.agent;
+
+    const s = await makeStudentAgent("avst@test.com", "AvStudent");
+    studentId = s.userId;
+
+    const f = await makeStaffAgent("faculty", "avfac@test.com", "AvFaculty");
+    facultyId = f.userId;
+  });
+
+  it("admin can assign a faculty advisor to a student", async () => {
+    const res = await adminAgent.patch(`/api/admin/users/${studentId}/advisor`).send({ advisorId: facultyId });
+    expect(res.status).toBe(200);
+    expect(res.body.user.advisorId).toBeTruthy();
+  });
+
+  it("assigned advisorId is persisted in DB", async () => {
+    await adminAgent.patch(`/api/admin/users/${studentId}/advisor`).send({ advisorId: facultyId });
+    const student = await User.findById(studentId).lean();
+    expect(student.advisorId.toString()).toBe(facultyId);
+  });
+
+  it("admin can clear advisor by sending null", async () => {
+    await adminAgent.patch(`/api/admin/users/${studentId}/advisor`).send({ advisorId: facultyId });
+    const res = await adminAgent.patch(`/api/admin/users/${studentId}/advisor`).send({ advisorId: null });
+    expect(res.status).toBe(200);
+    const student = await User.findById(studentId).lean();
+    expect(student.advisorId).toBeNull();
+  });
+
+  it("returns 400 when trying to assign advisor to a non-student", async () => {
+    const res = await adminAgent.patch(`/api/admin/users/${facultyId}/advisor`).send({ advisorId: facultyId });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when advisor is a student (not staff)", async () => {
+    const { userId: otherId } = await makeStudentAgent("avst2@test.com", "AnotherStudent");
+    const res = await adminAgent.patch(`/api/admin/users/${studentId}/advisor`).send({ advisorId: otherId });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 403 for non-admin", async () => {
+    const { agent } = await makeStudentAgent("av3@test.com");
+    const res = await agent.patch(`/api/admin/users/${studentId}/advisor`).send({ advisorId: facultyId });
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 404 for non-existent student id", async () => {
+    const fakeId = new mongoose.Types.ObjectId();
+    const res = await adminAgent.patch(`/api/admin/users/${fakeId}/advisor`).send({ advisorId: facultyId });
+    expect(res.status).toBe(404);
+  });
+
+  it("assigned advisor is auto-set as reviewedBy on leave submission", async () => {
+    // Assign advisor
+    await adminAgent.patch(`/api/admin/users/${studentId}/advisor`).send({ advisorId: facultyId });
+
+    const lt = await LeaveType.create({ name: "AdvisorLeave " + Date.now(), isActive: true });
+    const { agent: stAgent } = await (() => {
+      // Re-login as student
+      const ag = request.agent(app);
+      return ag.post("/api/login").send({ email: "avst@test.com", password: "pass1234" })
+        .then(() => ({ agent: ag }));
+    })();
+
+    const leaveRes = await stAgent.post("/api/leave").send({
+      leaveTypeId: lt._id.toString(),
+      startDate:   futureDate(7),
+      endDate:     futureDate(7),
+      reason:      "Advisor auto-assignment test leave",
+    });
+    expect(leaveRes.status).toBe(201);
+    expect(leaveRes.body.leave.reviewedBy.toString()).toBe(facultyId);
   });
 });

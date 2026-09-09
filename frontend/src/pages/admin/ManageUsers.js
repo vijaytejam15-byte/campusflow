@@ -1,5 +1,50 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { getUsers, updateUserRole, deleteUser, createUser } from "../../services/adminService";
+import { getUsers, updateUserRole, deleteUser, createUser, assignAdvisor } from "../../services/adminService";
+
+// ── Advisor Selector — shown inline for student rows ─────────────────────────
+function AdvisorCell({ user, faculty, onAssigned }) {
+  const [saving, setSaving] = useState(false);
+  const [err,    setErr]    = useState("");
+
+  const handleChange = async (e) => {
+    const advisorId = e.target.value;   // "" means "clear"
+    setSaving(true);
+    setErr("");
+    try {
+      const data = await assignAdvisor(user._id || user.id, advisorId || null);
+      onAssigned(user._id || user.id, data.user?.advisorId || null);
+    } catch (ex) {
+      setErr(ex.message || "Failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const currentAdvisor = user.advisorId
+    ? (typeof user.advisorId === "object" ? user.advisorId._id || user.advisorId : user.advisorId)
+    : "";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <select
+        className="cf-input cf-admin-role-select"
+        value={currentAdvisor}
+        onChange={handleChange}
+        disabled={saving}
+        aria-label={`Assign advisor for ${user.name}`}
+        style={{ fontSize: 13 }}
+      >
+        <option value="">— No advisor —</option>
+        {faculty.map((f) => (
+          <option key={f._id || f.id} value={f._id || f.id}>
+            {f.name} ({f.role})
+          </option>
+        ))}
+      </select>
+      {err && <span style={{ color: "var(--cf-danger)", fontSize: 12 }}>{err}</span>}
+    </div>
+  );
+}
 
 const ROLES = ["student", "faculty", "hod", "admin"];
 
@@ -104,6 +149,8 @@ export default function ManageUsers() {
   // { userId, currentRole } or null
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [actionError,   setActionError]   = useState("");
+  // Faculty/HOD list for advisor assignment dropdown
+  const [faculty,       setFaculty]       = useState([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -124,6 +171,19 @@ export default function ManageUsers() {
   // Reset to page 1 when filters change
   useEffect(() => { setPage(1); }, [search, roleFilter]);
 
+  // Load faculty + HOD list once for the advisor dropdown
+  useEffect(() => {
+    getUsers({ role: "faculty", limit: 200 })
+      .then((d) => {
+        const list = d.users || [];
+        // also fetch HODs
+        return getUsers({ role: "hod", limit: 200 }).then((d2) =>
+          setFaculty([...list, ...(d2.users || [])])
+        );
+      })
+      .catch(() => {/* non-fatal */});
+  }, []);
+
   const handleRoleChange = async (userId, newRole) => {
     setActionError("");
     try {
@@ -134,6 +194,12 @@ export default function ManageUsers() {
     } catch (err) {
       setActionError(err.message || "Failed to update role.");
     }
+  };
+
+  const handleAdvisorAssigned = (userId, newAdvisorId) => {
+    setUsers((prev) =>
+      prev.map((u) => (u._id === userId ? { ...u, advisorId: newAdvisorId } : u))
+    );
   };
 
   const handleDeleteConfirm = async () => {
@@ -211,6 +277,7 @@ export default function ManageUsers() {
                 <th>Email</th>
                 <th>Role</th>
                 <th>Department</th>
+                <th>Advisor</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -236,6 +303,17 @@ export default function ManageUsers() {
                   </td>
                   <td data-label="Department">
                     <span className="cf-admin-user-dept">{u.department || <em className="cf-muted-text">—</em>}</span>
+                  </td>
+                  <td data-label="Advisor">
+                    {u.role === "student" ? (
+                      <AdvisorCell
+                        user={u}
+                        faculty={faculty}
+                        onAssigned={handleAdvisorAssigned}
+                      />
+                    ) : (
+                      <em className="cf-muted-text">—</em>
+                    )}
                   </td>
                   <td data-label="Actions">
                     <button

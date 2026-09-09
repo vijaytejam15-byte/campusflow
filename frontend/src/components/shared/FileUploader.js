@@ -1,31 +1,40 @@
 import React, { useRef } from "react";
 
 /**
- * FileUploader — lets students attach documents to a request.
+ * FileUploader — lets students attach documents to a request or leave.
  *
- * Architecture note
- * ─────────────────
- * This project uses a JSON API (no multipart/form-data endpoint yet).
- * FileUploader reads the selected files client-side and calls onFilesChange
- * with a plain attachment metadata array:
+ * Architecture
+ * ────────────
+ * Files are selected client-side.  Each entry in the `files` array is:
  *
- *   [{ filename, originalName, mimeType, size, dataUrl? }]
+ *   {
+ *     originalName : string   — original filename shown in the UI
+ *     mimeType     : string
+ *     size         : number   — bytes
+ *     _file        : File     — the raw File object (used for upload)
+ *     filename     : string   — server-assigned filename after upload,
+ *                               or a temp client-side key before upload
+ *     uploaded     : boolean  — true once server confirmed the file
+ *   }
  *
- * The parent (CreateRequest) passes this array directly in the JSON body.
- * When a file-storage backend is added later, only the upload call inside
- * handleFiles needs to change — the rest of the UI stays the same.
+ * The parent component (CreateRequest / ApplyLeave) calls
+ * `uploadFiles(fileList)` from api.js to POST the files to
+ * POST /api/upload before submitting the main form.  After upload, it
+ * replaces the entry's `filename` with the server key and sets
+ * `uploaded = true`.  Only the `{ filename, originalName, mimeType, size }`
+ * subset is sent in the JSON body to the request / leave route.
  *
  * Props
  * ─────
- * files           {object[]}  current attachment list (controlled)
- * onFilesChange   {function}  called with the updated attachment array
- * maxFiles        {number}    max attachments allowed (default 5)
+ * files           {object[]}  controlled file list (see shape above)
+ * onFilesChange   {function}  called with updated array
+ * maxFiles        {number}    max attachments (default 5)
  * maxSizeMB       {number}    max size per file in MB (default 5)
- * accept          {string}    MIME types / extensions (default common docs)
+ * accept          {string}    MIME types / extensions
  * disabled        {boolean}
  */
 
-const DEFAULT_ACCEPT = ".pdf,.doc,.docx,.png,.jpg,.jpeg,.txt";
+const DEFAULT_ACCEPT    = ".pdf,.doc,.docx,.png,.jpg,.jpeg,.txt";
 const DEFAULT_MAX_FILES = 5;
 const DEFAULT_MAX_MB    = 5;
 
@@ -37,7 +46,7 @@ export default function FileUploader({
   accept       = DEFAULT_ACCEPT,
   disabled     = false,
 }) {
-  const inputRef  = useRef(null);
+  const inputRef              = useRef(null);
   const [dragOver, setDragOver] = React.useState(false);
 
   const maxBytes = maxSizeMB * 1024 * 1024;
@@ -63,15 +72,19 @@ export default function FileUploader({
       if (isDupe) continue;
 
       valid.push({
-        filename:     `${Date.now()}-${f.name}`,
+        // Temporary client-side key — replaced with server key after upload
+        filename:     `pending-${Date.now()}-${f.name}`,
         originalName: f.name,
         mimeType:     f.type,
         size:         f.size,
+        _file:        f,       // raw File object — needed for FormData upload
+        uploaded:     false,
       });
     }
 
     if (errors.length) {
-      alert(errors.join("\n")); // simple inline feedback — replace with a toast if desired
+      // eslint-disable-next-line no-alert
+      alert(errors.join("\n"));
     }
 
     if (valid.length) {
@@ -81,7 +94,6 @@ export default function FileUploader({
 
   const handleInputChange = (e) => {
     processFiles(e.target.files);
-    // Reset so the same file can be re-selected after removal
     e.target.value = "";
   };
 
@@ -96,7 +108,7 @@ export default function FileUploader({
   };
 
   const formatSize = (bytes) => {
-    if (bytes < 1024)       return `${bytes} B`;
+    if (bytes < 1024)        return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
@@ -144,6 +156,9 @@ export default function FileUploader({
                 {f.originalName}
               </span>
               <span className="cf-uploader__item-size">{formatSize(f.size)}</span>
+              {f.uploaded && (
+                <span className="cf-uploader__item-ok" aria-label="Uploaded" title="Uploaded">✓</span>
+              )}
               {!disabled && (
                 <button
                   type="button"

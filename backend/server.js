@@ -23,6 +23,7 @@ const leaveTypeRoutes = require("./routes/leaveType.routes");
 // ── Workflow engine routes (additive) ─────────────────────────────────────────
 const workflowInstanceRoutes = require("./routes/workflowInstance.routes");
 const configRoutes           = require("./routes/config.routes");
+const departmentRoutes       = require("./routes/department.routes");
 
 const { initSocket }     = require("./socket/socketHandler");
 const { startEscalationJob } = require("./jobs/escalation.job");
@@ -30,6 +31,7 @@ const { initWorkers, closeQueues } = require("./queues/workers");
 const { notFound, errorHandler }   = require("./middleware/errorHandler");
 const { requireAuth }    = require("./middleware/auth");
 const storageSvc         = require("./services/storage.service");
+const { uploadDocuments } = require("./middleware/upload");
 
 const app    = express();
 const server = http.createServer(app);
@@ -121,14 +123,64 @@ app.get("/", (_req, res) =>
   res.json({ message: "CampusFlow API", docs: "/api/docs", health: "/health" })
 );
 
+// ── File upload endpoint ──────────────────────────────────────────────────────
+// POST /api/upload — authenticated users upload 1-5 files, get back metadata.
+// The returned filename array is then included in the JSON body of the
+// request/leave submission so the main routes stay JSON-only.
+app.post("/api/upload", requireAuth, uploadDocuments, async (req, res) => {
+  try {
+    const files = req.uploadedFiles || [];
+    if (files.length === 0)
+      return res.status(400).json({ message: "No files uploaded" });
+
+    // For local driver files are already on disk (multer wrote them).
+    // For S3 driver we would stream them to S3 here — left as future work;
+    // local is the default and the one tested.
+    const result = files.map(({ filename, originalName, mimeType, size }) => ({
+      filename,
+      originalName,
+      mimeType,
+      size,
+    }));
+
+    logger.debug("[Upload] Files received", { count: files.length });
+    res.status(201).json({ message: "Files uploaded", files: result });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // ── Secure file download ───────────────────────────────────────────────────────
-app.get("/api/files/:key", requireAuth, (req, res) => {
+// Only the file owner (student who submitted) or a reviewer/admin may download.
+app.get("/api/files/:key", requireAuth, async (req, res) => {
+  const key = req.params.key;
+
+  // Authorisation: file must exist in a request or leave owned by this user,
+  // or the caller must be a reviewer/admin.
+  try {
+    const caller = await require("./models/User").findById(req.userId).select("role").lean();
+    const isReviewer = caller && ["faculty", "hod", "admin"].includes(caller.role);
+
+    if (!isReviewer) {
+      const Request = require("./models/Request");
+      const Leave   = require("./models/Leave");
+      const [inReq, inLeave] = await Promise.all([
+        Request.exists({ student: req.userId, "attachments.filename": key }),
+        Leave.exists({ student: req.userId, "documents.filename": key }),
+      ]);
+      if (!inReq && !inLeave)
+        return res.status(403).json({ message: "Access denied" });
+    }
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+
   if (storageSvc.DRIVER !== "local") {
     return res.status(400).json({ message: "Use signed URL for cloud storage downloads" });
   }
   try {
-    const stream = storageSvc.getLocalReadStream(req.params.key);
-    res.setHeader("Content-Disposition", `attachment; filename="${req.params.key}"`);
+    const stream = storageSvc.getLocalReadStream(key);
+    res.setHeader("Content-Disposition", `attachment; filename="${key}"`);
     stream.pipe(res);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message });
@@ -146,6 +198,7 @@ app.use("/api/leave-types", leaveTypeRoutes);
 // ── Workflow engine (additive) ────────────────────────────────────────────────
 app.use("/api",             workflowInstanceRoutes);
 app.use("/api/config",      configRoutes);
+app.use("/api/admin/departments", departmentRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

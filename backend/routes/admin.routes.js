@@ -155,9 +155,47 @@ router.patch("/users/:id/role", guard, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ── DELETE /api/admin/users/:id ───────────────────────────────────────────────
-router.delete("/users/:id", guard, async (req, res, next) => {
+// ── PATCH /api/admin/users/:id/advisor — assign or clear advisor ──────────────
+router.patch("/users/:id/advisor", guard, async (req, res, next) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id))
+      return res.status(400).json({ message: "Invalid user id" });
+
+    // advisorId can be a valid ObjectId string, or null/empty to clear
+    const { advisorId } = req.body || {};
+
+    const student = await User.findById(req.params.id).select("role").lean();
+    if (!student) return res.status(404).json({ message: "User not found" });
+    if (student.role !== "student")
+      return res.status(400).json({ message: "Advisor can only be assigned to students" });
+
+    let newAdvisorId = null;
+    if (advisorId && advisorId !== "none") {
+      if (!mongoose.Types.ObjectId.isValid(advisorId))
+        return res.status(400).json({ message: "Invalid advisor id" });
+
+      const advisor = await User.findById(advisorId).select("role").lean();
+      if (!advisor)
+        return res.status(404).json({ message: "Advisor user not found" });
+      if (!["faculty", "hod", "admin"].includes(advisor.role))
+        return res.status(400).json({ message: "Advisor must be a faculty member, HOD, or admin" });
+
+      newAdvisorId = advisorId;
+    }
+
+    const updated = await User.findByIdAndUpdate(
+      req.params.id,
+      { advisorId: newAdvisorId },
+      { new: true }
+    ).select("-password");
+    if (!updated) return res.status(404).json({ message: "User not found" });
+
+    res.json({ message: "Advisor updated", user: publicUser(updated) });
+  } catch (err) { next(err); }
+});
+
+// ── DELETE /api/admin/users/:id ───────────────────────────────────────────────
+router.delete("/users/:id", guard, async (req, res, next) => {  try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id))
       return res.status(400).json({ message: "Invalid user id" });
 

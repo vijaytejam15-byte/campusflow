@@ -203,4 +203,43 @@ router.post("/logout-all", requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── CHANGE PASSWORD ────────────────────────────────────────────────────────────
+
+router.post("/change-password", requireAuth, async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body || {};
+
+    if (!currentPassword || !newPassword)
+      return res.status(400).json({ message: "currentPassword and newPassword are required" });
+
+    if (String(newPassword).length < 6)
+      return res.status(400).json({ message: "New password must be at least 6 characters" });
+
+    if (String(newPassword).length > 128)
+      return res.status(400).json({ message: "New password must be under 128 characters" });
+
+    if (currentPassword === newPassword)
+      return res.status(400).json({ message: "New password must differ from the current password" });
+
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(401).json({ message: "Not authenticated" });
+
+    const match = await bcrypt.compare(String(currentPassword), user.password);
+    if (!match)
+      return res.status(401).json({ message: "Current password is incorrect" });
+
+    user.password = await bcrypt.hash(String(newPassword), 12);
+    await user.save();
+
+    // Invalidate all existing refresh tokens (force re-login on other devices)
+    await RefreshToken.deleteMany({ userId: req.userId });
+
+    // Issue a fresh token pair for the current session so the user isn't logged out here
+    await issueTokenPair(user, res, req);
+
+    logger.info("Password changed", { userId: user._id });
+    res.json({ message: "Password changed successfully. Other sessions have been logged out." });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

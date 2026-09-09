@@ -21,6 +21,38 @@ export function setSessionExpiredHandler(fn) {
   _sessionExpiredHandler = fn;
 }
 
+/**
+ * Upload files (multipart/form-data) and return the server-side metadata.
+ * Does NOT set Content-Type — browser must set it with the boundary.
+ *
+ * @param {File[]} fileList  Array of File objects from an <input type="file">
+ * @returns {Promise<{ files: {filename,originalName,mimeType,size}[] }>}
+ */
+export async function uploadFiles(fileList) {
+  const formData = new FormData();
+  for (const f of fileList) {
+    formData.append("documents", f);
+  }
+  const response = await fetch(`${API_URL}/api/upload`, {
+    method:      "POST",
+    credentials: "include",
+    body:        formData,
+    // DO NOT set Content-Type here — browser adds multipart boundary automatically
+  });
+
+  let data = {};
+  try { data = await response.json(); } catch { /* empty */ }
+
+  if (response.status === 401 && _sessionExpiredHandler) {
+    _sessionExpiredHandler();
+    throw Object.assign(new Error(data.message || "Session expired"), { status: 401 });
+  }
+  if (!response.ok) {
+    throw Object.assign(new Error(data.message || "Upload failed"), { status: response.status });
+  }
+  return data;
+}
+
 async function _request(path, options = {}) {
   const response = await fetch(`${API_URL}${path}`, {
     credentials: "include", // always send/receive the httpOnly auth cookie
@@ -71,6 +103,8 @@ export const api = {
   getProfile: () => _request("/api/profile", { method: "GET" }),
   updateProfile: (body) =>
     _request("/api/profile", { method: "PUT", body: JSON.stringify(body) }),
+  changePassword: (body) =>
+    _request("/api/change-password", { method: "POST", body: JSON.stringify(body) }),
 
   // ── Courses ─────────────────────────────────────────────────────────────────
   getCourses: (search) => {

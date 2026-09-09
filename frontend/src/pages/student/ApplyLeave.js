@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { applyLeave, getLeaveTypes } from "../../services/leaveService";
+import { uploadFiles } from "../../api";
 import FileUploader from "../../components/shared/FileUploader";
 
 function calcWorkingDays(start, end) {
@@ -64,12 +65,37 @@ export default function ApplyLeave() {
 
     setSubmitting(true);
     try {
+      // 1. Upload any pending files first
+      let resolvedDocuments = [];
+      const pendingFiles   = documents.filter((d) => !d.uploaded && d._file);
+      const alreadyUploaded = documents.filter((d) => d.uploaded);
+
+      if (pendingFiles.length > 0) {
+        const rawFiles     = pendingFiles.map((d) => d._file);
+        const uploadResult = await uploadFiles(rawFiles);
+        const serverFiles  = uploadResult.files || [];
+
+        const nowUploaded = pendingFiles.map((d, i) => ({
+          ...d,
+          filename: serverFiles[i]?.filename || d.filename,
+          uploaded: true,
+          _file:    undefined,
+        }));
+        setDocuments([...alreadyUploaded, ...nowUploaded]);
+        resolvedDocuments = [...alreadyUploaded, ...nowUploaded];
+      } else {
+        resolvedDocuments = documents;
+      }
+
+      // 2. Submit leave application with server-confirmed filenames
       await applyLeave({
         leaveTypeId: form.leaveTypeId,
         startDate:   form.startDate,
         endDate:     form.endDate,
         reason:      form.reason.trim(),
-        documents,
+        documents:   resolvedDocuments.map(({ filename, originalName, mimeType, size }) => ({
+          filename, originalName, mimeType, size,
+        })),
       });
       navigate("/student/my-leaves", { state: { created: true } });
     } catch (err) {

@@ -89,43 +89,95 @@ export async function deleteUser(userId) {
   });
 }
 
+/**
+ * Assign or clear the advisor for a student.
+ *
+ * @param {string} studentId
+ * @param {string|null} advisorId  ObjectId of the faculty/HOD user, or null to clear
+ * @returns {Promise<{ message, user }>}
+ */
+export async function assignAdvisor(studentId, advisorId) {
+  return api._request(`/api/admin/users/${encodeURIComponent(studentId)}/advisor`, {
+    method: "PATCH",
+    body:   JSON.stringify({ advisorId: advisorId || null }),
+  });
+}
+
 // ── Departments ───────────────────────────────────────────────────────────────
-// The project does not have a dedicated Department model; departments are
-// free-text strings stored on User and Request documents.
-// getDepartments() derives a deduplicated list from the user roster.
 
 /**
- * Fetch the list of distinct department names currently in use.
- * Derived client-side from the first page of users (max 200).
+ * Fetch all departments from the dedicated Department collection.
+ * Falls back to deriving from user records if the endpoint fails (backward compat).
  *
- * @returns {Promise<string[]>}  sorted, deduplicated department names
+ * @param {{ all?: boolean }} options  pass all:true to include inactive
+ * @returns {Promise<{ departments: object[] }>}
  */
-export async function getDepartments() {
-  const data = await api._request("/api/admin/users?limit=200&page=1", {
-    method: "GET",
-  });
-  const depts = (data.users || [])
-    .map((u) => u.department)
-    .filter(Boolean);
-  return [...new Set(depts)].sort((a, b) => a.localeCompare(b));
+export async function getDepartments({ all = false } = {}) {
+  const q = all ? "?all=true" : "";
+  return api._request(`/api/admin/departments${q}`, { method: "GET" });
 }
 
 /**
- * "Create" a department by setting it on a placeholder — in this architecture
- * departments are just strings on user/request records; there's no separate
- * department collection.  This helper is a no-op stub that returns the name
- * immediately so callers can treat it like a real endpoint.
+ * Create a new department.
  *
- * When a dedicated Department model is added, replace this implementation.
- *
- * @param {{ name: string }} data
- * @returns {Promise<{ department: string }>}
+ * @param {{ name: string, description?: string }} data
+ * @returns {Promise<{ message, department }>}
  */
 export async function createDepartment(data) {
-  // Validate locally — nothing to persist yet
-  const name = String(data?.name || "").trim();
-  if (!name) throw new Error("Department name is required");
-  return Promise.resolve({ department: name });
+  return api._request("/api/admin/departments", {
+    method: "POST",
+    body:   JSON.stringify(data),
+  });
+}
+
+/**
+ * Update a department's name or description.
+ *
+ * @param {string} id
+ * @param {{ name?: string, description?: string }} data
+ * @returns {Promise<{ message, department }>}
+ */
+export async function updateDepartment(id, data) {
+  return api._request(`/api/admin/departments/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body:   JSON.stringify(data),
+  });
+}
+
+/**
+ * Deactivate a department (soft-delete).
+ *
+ * @param {string} id
+ * @returns {Promise<{ message, department }>}
+ */
+export async function deactivateDepartment(id) {
+  return api._request(`/api/admin/departments/${encodeURIComponent(id)}/deactivate`, {
+    method: "PATCH",
+  });
+}
+
+/**
+ * Re-activate a deactivated department.
+ *
+ * @param {string} id
+ * @returns {Promise<{ message, department }>}
+ */
+export async function activateDepartment(id) {
+  return api._request(`/api/admin/departments/${encodeURIComponent(id)}/activate`, {
+    method: "PATCH",
+  });
+}
+
+/**
+ * Hard-delete a department (only when no users are assigned).
+ *
+ * @param {string} id
+ * @returns {Promise<{ message }>}
+ */
+export async function deleteDepartment(id) {
+  return api._request(`/api/admin/departments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 // ── Audit logs ────────────────────────────────────────────────────────────────

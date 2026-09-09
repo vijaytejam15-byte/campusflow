@@ -1,72 +1,132 @@
 import React, { useEffect, useState } from "react";
-import { getDepartments, createDepartment, getUsers } from "../../services/adminService";
+import {
+  getDepartments,
+  createDepartment,
+  updateDepartment,
+  deactivateDepartment,
+  deleteDepartment,
+} from "../../services/adminService";
 
 export default function ManageDepartments() {
   const [departments, setDepartments] = useState([]);
-  const [deptCounts,  setDeptCounts]  = useState({});
   const [loading,     setLoading]     = useState(true);
   const [error,       setError]       = useState("");
 
   // Create-form state
-  const [newName,  setNewName]  = useState("");
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState("");
-  const [createOk,    setCreateOk]    = useState("");
+  const [newName,       setNewName]       = useState("");
+  const [newDesc,       setNewDesc]       = useState("");
+  const [creating,      setCreating]      = useState(false);
+  const [createError,   setCreateError]   = useState("");
+  const [createOk,      setCreateOk]      = useState("");
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      setLoading(true);
-      setError("");
-      try {
-        // Load departments (deduplicated from user records) and user roster
-        const [depts, data] = await Promise.all([
-          getDepartments(),
-          getUsers({ limit: 200 }),
-        ]);
-        if (cancelled) return;
+  // Inline-edit state
+  const [editingId,     setEditingId]     = useState(null);
+  const [editName,      setEditName]      = useState("");
+  const [editDesc,      setEditDesc]      = useState("");
+  const [editSaving,    setEditSaving]    = useState(false);
+  const [editError,     setEditError]     = useState("");
 
-        // Count members per department
-        const counts = {};
-        (data.users || []).forEach((u) => {
-          if (u.department) counts[u.department] = (counts[u.department] || 0) + 1;
-        });
+  function load() {
+    setLoading(true);
+    setError("");
+    getDepartments({ all: true })
+      .then((data) => setDepartments(data.departments || []))
+      .catch((err) => setError(err.message || "Could not load departments."))
+      .finally(() => setLoading(false));
+  }
 
-        setDepartments(depts);
-        setDeptCounts(counts);
-      } catch (err) {
-        if (!cancelled) setError(err.message || "Could not load departments.");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-    load();
-    return () => { cancelled = true; };
-  }, []);
+  useEffect(load, []);
 
+  // ── Create ──────────────────────────────────────────────────────────────────
   const handleCreate = async (e) => {
     e.preventDefault();
     const name = newName.trim();
-    if (!name) {
-      setCreateError("Department name cannot be empty.");
-      return;
-    }
-    if (departments.includes(name)) {
-      setCreateError(`"${name}" already exists.`);
-      return;
-    }
+    if (!name) { setCreateError("Department name cannot be empty."); return; }
     setCreating(true);
     setCreateError("");
     setCreateOk("");
     try {
-      await createDepartment({ name });
-      setDepartments((prev) => [...prev, name].sort((a, b) => a.localeCompare(b)));
+      const data = await createDepartment({ name, description: newDesc.trim() });
+      setDepartments((prev) =>
+        [...prev, data.department].sort((a, b) => a.name.localeCompare(b.name))
+      );
       setNewName("");
-      setCreateOk(`Department "${name}" added. Assign it to users to make it appear in reports.`);
+      setNewDesc("");
+      setCreateOk(`Department "${name}" created.`);
     } catch (err) {
       setCreateError(err.message || "Failed to create department.");
     } finally {
       setCreating(false);
+    }
+  };
+
+  // ── Inline edit ─────────────────────────────────────────────────────────────
+  const startEdit = (dept) => {
+    setEditingId(dept._id);
+    setEditName(dept.name);
+    setEditDesc(dept.description || "");
+    setEditError("");
+  };
+  const cancelEdit = () => { setEditingId(null); setEditError(""); };
+  const saveEdit = async (id) => {
+    const name = editName.trim();
+    if (!name) { setEditError("Name cannot be empty."); return; }
+    setEditSaving(true);
+    setEditError("");
+    try {
+      const data = await updateDepartment(id, { name, description: editDesc.trim() });
+      setDepartments((prev) =>
+        prev.map((d) => d._id === id ? data.department : d)
+           .sort((a, b) => a.name.localeCompare(b.name))
+      );
+      setEditingId(null);
+    } catch (err) {
+      setEditError(err.message || "Failed to update.");
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  // ── Deactivate ───────────────────────────────────────────────────────────────
+  const handleDeactivate = async (dept) => {
+    if (!window.confirm(`Deactivate "${dept.name}"?`)) return;
+    try {
+      const data = await deactivateDepartment(dept._id);
+      setDepartments((prev) => prev.map((d) => d._id === dept._id ? data.department : d));
+    } catch (err) {
+      setError(err.message || "Failed to deactivate.");
+    }
+  };
+
+  // ── Activate ─────────────────────────────────────────────────────────────────
+  const handleActivate = async (dept) => {
+    try {
+      const { activateDepartment } = await import("../../services/adminService");
+      const data = await activateDepartment(dept._id);
+      setDepartments((prev) => prev.map((d) => d._id === dept._id ? data.department : d));
+    } catch {
+      // fallback: call PATCH directly
+      try {
+        const res = await fetch(`/api/admin/departments/${dept._id}/activate`, {
+          method: "PATCH", credentials: "include",
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message);
+        setDepartments((prev) => prev.map((d) => d._id === dept._id ? data.department : d));
+      } catch (err) {
+        setError(err.message || "Failed to activate.");
+      }
+    }
+  };
+
+  // ── Delete ───────────────────────────────────────────────────────────────────
+  const handleDelete = async (dept) => {
+    if (!window.confirm(`Permanently delete "${dept.name}"? This cannot be undone.`)) return;
+    try {
+      await deleteDepartment(dept._id);
+      setDepartments((prev) => prev.filter((d) => d._id !== dept._id));
+    } catch (err) {
+      setError(err.message || "Failed to delete.");
     }
   };
 
@@ -76,7 +136,7 @@ export default function ManageDepartments() {
         <p className="cf-eyebrow">Admin</p>
         <h1 className="cf-welcome__title">Manage Departments</h1>
         <p className="cf-welcome__sub">
-          Departments are derived from user profiles. Add new ones here and assign them to users.
+          Add and manage departments. These are stored in the database and can be assigned to users.
         </p>
       </section>
 
@@ -98,6 +158,15 @@ export default function ManageDepartments() {
             maxLength={100}
             required
           />
+          <input
+            className="cf-input"
+            type="text"
+            placeholder="Description (optional)"
+            value={newDesc}
+            onChange={(e) => setNewDesc(e.target.value)}
+            aria-label="Department description"
+            maxLength={500}
+          />
           <button
             type="submit"
             className="cf-btn cf-btn--auto"
@@ -106,9 +175,6 @@ export default function ManageDepartments() {
             {creating ? "Adding…" : "Add department"}
           </button>
         </form>
-        <p className="cf-hint">
-          Note: departments are stored as text fields on user accounts — no separate database table is used.
-        </p>
       </section>
 
       {/* Department list */}
@@ -125,18 +191,66 @@ export default function ManageDepartments() {
         ) : departments.length === 0 ? (
           <div className="cf-empty">
             <p className="cf-empty__title">No departments yet</p>
-            <p className="cf-empty__text">
-              Departments appear here once assigned to at least one user profile.
-            </p>
+            <p className="cf-empty__text">Add your first department above.</p>
           </div>
         ) : (
           <ul className="cf-dept-list" aria-label="Department list">
             {departments.map((dept) => (
-              <li key={dept} className="cf-dept-item">
-                <span className="cf-dept-item__name">{dept}</span>
-                <span className="cf-dept-item__count">
-                  {deptCounts[dept] ?? 0} member{deptCounts[dept] !== 1 ? "s" : ""}
-                </span>
+              <li key={dept._id} className={`cf-dept-item${!dept.isActive ? " cf-dept-item--inactive" : ""}`}>
+                {editingId === dept._id ? (
+                  <div style={{ flex: 1 }}>
+                    {editError && <span style={{ color: "var(--cf-danger)", fontSize: 13 }}>{editError}</span>}
+                    <input
+                      className="cf-input"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      maxLength={100}
+                      style={{ marginBottom: 4 }}
+                    />
+                    <input
+                      className="cf-input"
+                      value={editDesc}
+                      onChange={(e) => setEditDesc(e.target.value)}
+                      placeholder="Description (optional)"
+                      maxLength={500}
+                    />
+                    <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                      <button className="cf-btn cf-btn--auto" style={{ padding: "4px 12px" }}
+                        onClick={() => saveEdit(dept._id)} disabled={editSaving}>
+                        {editSaving ? "Saving…" : "Save"}
+                      </button>
+                      <button className="cf-btn cf-btn--ghost" style={{ padding: "4px 12px" }}
+                        onClick={cancelEdit}>Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ flex: 1 }}>
+                      <span className="cf-dept-item__name">
+                        {dept.name}
+                        {!dept.isActive && <span className="cf-badge cf-badge--inactive" style={{ marginLeft: 8 }}>Inactive</span>}
+                      </span>
+                      {dept.description && (
+                        <p style={{ fontSize: 13, color: "var(--cf-muted)", margin: "2px 0 0" }}>{dept.description}</p>
+                      )}
+                    </div>
+                    <span className="cf-dept-item__count">
+                      {dept.memberCount ?? 0} member{dept.memberCount !== 1 ? "s" : ""}
+                    </span>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button className="cf-btn cf-btn--ghost" style={{ padding: "3px 10px", fontSize: 13 }}
+                        onClick={() => startEdit(dept)}>Edit</button>
+                      {dept.isActive
+                        ? <button className="cf-btn cf-btn--ghost" style={{ padding: "3px 10px", fontSize: 13 }}
+                            onClick={() => handleDeactivate(dept)}>Deactivate</button>
+                        : <button className="cf-btn cf-btn--ghost" style={{ padding: "3px 10px", fontSize: 13 }}
+                            onClick={() => handleActivate(dept)}>Activate</button>
+                      }
+                      <button className="cf-btn cf-btn--danger" style={{ padding: "3px 10px", fontSize: 13 }}
+                        onClick={() => handleDelete(dept)}>Delete</button>
+                    </div>
+                  </>
+                )}
               </li>
             ))}
           </ul>
