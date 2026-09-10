@@ -44,6 +44,8 @@ import ManageLeaveTypes    from "./pages/admin/ManageLeaveTypes";
 import LeaveReports        from "./pages/admin/LeaveReports";
 import WorkflowTemplates       from "./pages/admin/WorkflowTemplates";
 import WorkflowTemplateBuilder from "./pages/admin/WorkflowTemplateBuilder";
+import AuditTrail              from "./pages/admin/AuditTrail";
+import NotificationCenter      from "./pages/NotificationCenter";
 
 import "./App.css";
 
@@ -126,16 +128,22 @@ function AppRoutes() {
               <Route path="/staff/leave-queue"        element={<StaffLeaveQueue />} />
             </Route>
 
+            {/* ── All authenticated: notifications ── */}
+            <Route element={<RoleRoute allowedRoles={["student","faculty","hod","admin"]} />}>
+              <Route path="/notifications" element={<NotificationCenter />} />
+            </Route>
+
             {/* ── Admin ── */}
             <Route element={<RoleRoute allowedRoles={["admin"]} />}>
-              <Route path="/admin"                  element={<AdminDashboard />} />
-              <Route path="/admin/analytics"        element={<AnalyticsDashboard />} />
-              <Route path="/admin/users"            element={<ManageUsers />} />
-              <Route path="/admin/departments"      element={<ManageDepartments />} />
-              <Route path="/admin/audit-logs"       element={<AuditLogs />} />
-              <Route path="/admin/requests"         element={<AdminRequests />} />
-              <Route path="/admin/leave-types"      element={<ManageLeaveTypes />} />
-              <Route path="/admin/leave-reports"    element={<LeaveReports />} />
+              <Route path="/admin"                       element={<AdminDashboard />} />
+              <Route path="/admin/analytics"             element={<AnalyticsDashboard />} />
+              <Route path="/admin/users"                 element={<ManageUsers />} />
+              <Route path="/admin/departments"           element={<ManageDepartments />} />
+              <Route path="/admin/audit-logs"            element={<AuditLogs />} />
+              <Route path="/admin/audit-trail"           element={<AuditTrail />} />
+              <Route path="/admin/requests"              element={<AdminRequests />} />
+              <Route path="/admin/leave-types"           element={<ManageLeaveTypes />} />
+              <Route path="/admin/leave-reports"         element={<LeaveReports />} />
               <Route path="/admin/workflow-templates"     element={<WorkflowTemplates />} />
               <Route path="/admin/workflow-templates/new" element={<WorkflowTemplateBuilder />} />
               <Route path="/admin/workflow-templates/:id" element={<WorkflowTemplateBuilder />} />

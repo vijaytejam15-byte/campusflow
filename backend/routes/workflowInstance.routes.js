@@ -1,66 +1,65 @@
 /**
  * workflowInstance.routes.js
  *
- * GET  /api/requests/:id/workflow  — get workflow status for a request
- * POST /api/requests/:id/workflow/advance — reviewer advances a stage
- * GET  /api/leave/:id/workflow     — get workflow status for a leave
- * POST /api/leave/:id/workflow/advance — reviewer advances a leave stage
+ * GET  /api/requests/:id/workflow          — workflow status
+ * POST /api/requests/:id/workflow/advance  — advance stage (idempotent)
+ * GET  /api/leave/:id/workflow             — workflow status
+ * POST /api/leave/:id/workflow/advance     — advance stage (idempotent)
  *
- * Mounted in server.js directly on the /api router.
- * Authorization: students may only view their own; reviewers may view any.
- * IDOR: entityId is validated against the authenticated user before returning.
+ * Features wired:
+ *   Feature 1  — Advanced Workflow Engine (advanceStage)
+ *   Feature 2  — Conditional Transitions (conditionContext passed at creation)
+ *   Feature 3  — Parallel Approvals (advanceStage handles voting)
+ *   Feature 6  — Notifications (createNotification on advance)
+ *   Feature 7  — Audit Trail (writeAudit on advance)
+ *   Feature 8  — Idempotency (Idempotency-Key header)
+ *   Feature 9  — Concurrency Control (409 on stale __v)
  */
 "use strict";
 
-const express  = require("express");
-const mongoose = require("mongoose");
-const Request  = require("../models/Request");
-const Leave    = require("../models/Leave");
-const User     = require("../models/User");
-const { requireAuth } = require("../middleware/auth");
-const workflowSvc     = require("../services/workflow.service");
-const { emitRequestStatusUpdated } = require("../socket/socketHandler");
-const { queueEmail }               = require("../queues/workers");
-const logger                       = require("../config/logger");
+const express   = require("express");
+const mongoose  = require("mongoose");
+const Request   = require("../models/Request");
+const Leave     = require("../models/Leave");
+const User      = require("../models/User");
+const { requireAuth }               = require("../middleware/auth");
+const idempotency                   = require("../middleware/idempotency");
+const workflowSvc                   = require("../services/workflow.service");
+const notifSvc                      = require("../services/notification.service");
+const { auditWorkflowAdvance }      = require("../services/audit.service");
+const { emitRequestStatusUpdated }  = require("../socket/socketHandler");
+const { queueEmail }                = require("../queues/workers");
+const logger                        = require("../config/logger");
 
 const router = express.Router({ mergeParams: true });
 
 function isValidId(id) { return mongoose.Types.ObjectId.isValid(id); }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Load and IDOR-check the entity (request or leave).
- * Students can only access their own. Reviewers can access any.
- */
+// ── IDOR + entity loader ──────────────────────────────────────────────────────
 async function loadEntity(entityId, entityType, userId, userRole) {
   if (!isValidId(entityId)) return { err: { status: 400, message: "Invalid id" } };
-
   const isReviewer = ["faculty", "hod", "admin"].includes(userRole);
-  let entity;
 
+  let entity;
   if (entityType === "request") {
-    const query = isReviewer ? { _id: entityId } : { _id: entityId, student: userId };
-    entity = await Request.findOne(query).lean();
+    entity = await Request.findOne(
+      isReviewer ? { _id: entityId } : { _id: entityId, student: userId }
+    ).lean();
   } else {
-    const query = isReviewer ? { _id: entityId } : { _id: entityId, student: userId };
-    entity = await Leave.findOne(query).lean();
+    entity = await Leave.findOne(
+      isReviewer ? { _id: entityId } : { _id: entityId, student: userId }
+    ).lean();
   }
 
   if (!entity) return { err: { status: 404, message: `${entityType} not found` } };
   return { entity };
 }
 
-/**
- * Post-advance: sync the entity's legacy status field and emit notifications.
- */
+// ── Sync legacy status after terminal workflow outcome ────────────────────────
 async function syncEntityStatus(entityId, entityType, overallStatus, actorName, studentId) {
-  // Map workflow overall status → legacy status string
   const statusMap = { approved: "approved", rejected: "rejected", closed: "closed" };
   const legacyStatus = statusMap[overallStatus];
-  if (!legacyStatus) return; // still in_progress — no sync needed
+  if (!legacyStatus) return;
 
   if (entityType === "request") {
     await Request.findByIdAndUpdate(entityId, { status: legacyStatus, reviewedAt: new Date() });
@@ -68,166 +67,113 @@ async function syncEntityStatus(entityId, entityType, overallStatus, actorName, 
     await Leave.findByIdAndUpdate(entityId, { status: legacyStatus, reviewedAt: new Date() });
   }
 
-  // Emit socket notification
   try {
-    emitRequestStatusUpdated(studentId, {
-      requestId:    entityId,
-      newStatus:    legacyStatus,
-      reviewerName: actorName || "Reviewer",
-    });
+    emitRequestStatusUpdated(studentId, { requestId: entityId, newStatus: legacyStatus, reviewerName: actorName || "Reviewer" });
   } catch { /* non-fatal */ }
 
-  // Queue email
   try {
     if (entityType === "request") {
       const student = await User.findById(studentId).select("email name").lean();
-      if (student) {
-        queueEmail("requestStatusChanged", {
-          to:        student.email,
-          name:      student.name,
-          newStatus: legacyStatus,
-        }).catch(() => {});
-      }
+      if (student) queueEmail("requestStatusChanged", { to: student.email, name: student.name, newStatus: legacyStatus }).catch(() => {});
     }
   } catch { /* non-fatal */ }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// REQUEST workflow routes
-// ─────────────────────────────────────────────────────────────────────────────
+// ── shared advance handler factory ───────────────────────────────────────────
+function makeAdvanceHandler(entityType) {
+  return async function advanceHandler(req, res, next) {
+    try {
+      const entityId = entityType === "request" ? req.params.requestId : req.params.leaveId;
 
-// GET /api/requests/:requestId/workflow
-router.get("/requests/:requestId/workflow", requireAuth, async (req, res, next) => {
-  try {
-    const caller = await User.findById(req.userId).select("role").lean();
-    if (!caller) return res.status(401).json({ message: "Not authenticated" });
+      const caller = await User.findById(req.userId).select("role name").lean();
+      if (!caller) return res.status(401).json({ message: "Not authenticated" });
+      if (!["faculty", "hod", "admin"].includes(caller.role))
+        return res.status(403).json({ message: "Only reviewers can advance workflow stages" });
 
-    const { err } = await loadEntity(req.params.requestId, "request", req.userId, caller.role);
-    if (err) return res.status(err.status).json({ message: err.message });
+      const { err, entity } = await loadEntity(entityId, entityType, req.userId, caller.role);
+      if (err) return res.status(err.status).json({ message: err.message });
 
-    const status = await workflowSvc.getWorkflowStatus(req.params.requestId, "request");
-    if (!status) return res.status(404).json({ message: "No workflow instance for this request" });
+      const { action, comment } = req.body || {};
+      if (!action) return res.status(400).json({ message: "action is required" });
 
-    res.json({ workflow: status });
-  } catch (err) { next(err); }
-});
+      const instance = await workflowSvc.getInstanceForEntity(entityId, entityType);
+      if (!instance) return res.status(404).json({ message: `No workflow instance for this ${entityType}` });
 
-// POST /api/requests/:requestId/workflow/advance
-router.post("/requests/:requestId/workflow/advance", requireAuth, async (req, res, next) => {
-  try {
-    const caller = await User.findById(req.userId).select("role name").lean();
-    if (!caller) return res.status(401).json({ message: "Not authenticated" });
-    if (!["faculty", "hod", "admin"].includes(caller.role)) {
-      return res.status(403).json({ message: "Only reviewers can advance workflow stages" });
+      const { instance: updated, advancedTo } = await workflowSvc.advanceStage(
+        instance._id, action, req.userId, comment || ""
+      );
+
+      // Sync legacy status if terminal
+      await syncEntityStatus(entityId, entityType, updated.overallStatus, caller.name, entity.student);
+
+      // Feature 7: Audit
+      await auditWorkflowAdvance(updated, action, req.userId, caller.name, caller.role, req);
+
+      // Feature 6: Notification to student
+      try {
+        const studentId = entity.student;
+        const isTerminal = updated.overallStatus !== "in_progress";
+        if (isTerminal) {
+          await notifSvc.createNotification({
+            userId:     studentId,
+            type:       updated.overallStatus === "approved" ? "workflow_approved" : "workflow_rejected",
+            title:      `Your ${entityType} has been ${updated.overallStatus}`,
+            body:       comment ? `Comment: ${comment}` : "",
+            entityKind: entityType,
+            entityId:   entityId,
+            actionUrl:  entityType === "request" ? `/student/requests/${entityId}` : `/leave/${entityId}`,
+          });
+        } else {
+          await notifSvc.createNotification({
+            userId:     studentId,
+            type:       "workflow_stage_advanced",
+            title:      `Your ${entityType} moved to: ${advancedTo}`,
+            body:       comment ? `Reviewer comment: ${comment}` : "",
+            entityKind: entityType,
+            entityId:   entityId,
+            actionUrl:  entityType === "request" ? `/student/requests/${entityId}` : `/leave/${entityId}`,
+          });
+        }
+      } catch { /* non-fatal */ }
+
+      logger.info("[WorkflowRoute] Stage advanced", { entityId, entityType, action, advancedTo, actorId: req.userId });
+
+      return res.json({
+        message:       `Stage action "${action}" recorded`,
+        advancedTo,
+        overallStatus: updated.overallStatus,
+        workflow:      await workflowSvc.getWorkflowStatus(entityId, entityType),
+      });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ message: err.message });
+      next(err);
     }
+  };
+}
 
-    const { err, entity } = await loadEntity(req.params.requestId, "request", req.userId, caller.role);
-    if (err) return res.status(err.status).json({ message: err.message });
+// ── shared status handler factory ─────────────────────────────────────────────
+function makeStatusHandler(entityType) {
+  return async function statusHandler(req, res, next) {
+    try {
+      const entityId = entityType === "request" ? req.params.requestId : req.params.leaveId;
+      const caller = await User.findById(req.userId).select("role").lean();
+      if (!caller) return res.status(401).json({ message: "Not authenticated" });
 
-    const { action, comment } = req.body || {};
-    if (!action) return res.status(400).json({ message: "action is required" });
+      const { err } = await loadEntity(entityId, entityType, req.userId, caller.role);
+      if (err) return res.status(err.status).json({ message: err.message });
 
-    const instance = await workflowSvc.getInstanceForEntity(req.params.requestId, "request");
-    if (!instance) return res.status(404).json({ message: "No workflow instance for this request" });
+      const status = await workflowSvc.getWorkflowStatus(entityId, entityType);
+      if (!status) return res.status(404).json({ message: `No workflow instance for this ${entityType}` });
 
-    const { instance: updated, advancedTo } = await workflowSvc.advanceStage(
-      instance._id,
-      action,
-      req.userId,
-      comment || ""
-    );
+      res.json({ workflow: status });
+    } catch (err) { next(err); }
+  };
+}
 
-    // Sync legacy status if terminal
-    await syncEntityStatus(
-      req.params.requestId,
-      "request",
-      updated.overallStatus,
-      caller.name,
-      entity.student
-    );
-
-    logger.info("[WorkflowRoute] Request stage advanced", {
-      requestId: req.params.requestId,
-      action,
-      advancedTo,
-      actorId: req.userId,
-    });
-
-    res.json({
-      message:       `Stage action "${action}" recorded`,
-      advancedTo,
-      overallStatus: updated.overallStatus,
-      workflow:      await workflowSvc.getWorkflowStatus(req.params.requestId, "request"),
-    });
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ message: err.message });
-    next(err);
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LEAVE workflow routes
-// ─────────────────────────────────────────────────────────────────────────────
-
-// GET /api/leave/:leaveId/workflow
-router.get("/leave/:leaveId/workflow", requireAuth, async (req, res, next) => {
-  try {
-    const caller = await User.findById(req.userId).select("role").lean();
-    if (!caller) return res.status(401).json({ message: "Not authenticated" });
-
-    const { err } = await loadEntity(req.params.leaveId, "leave", req.userId, caller.role);
-    if (err) return res.status(err.status).json({ message: err.message });
-
-    const status = await workflowSvc.getWorkflowStatus(req.params.leaveId, "leave");
-    if (!status) return res.status(404).json({ message: "No workflow instance for this leave" });
-
-    res.json({ workflow: status });
-  } catch (err) { next(err); }
-});
-
-// POST /api/leave/:leaveId/workflow/advance
-router.post("/leave/:leaveId/workflow/advance", requireAuth, async (req, res, next) => {
-  try {
-    const caller = await User.findById(req.userId).select("role name").lean();
-    if (!caller) return res.status(401).json({ message: "Not authenticated" });
-    if (!["faculty", "hod", "admin"].includes(caller.role)) {
-      return res.status(403).json({ message: "Only reviewers can advance workflow stages" });
-    }
-
-    const { err, entity } = await loadEntity(req.params.leaveId, "leave", req.userId, caller.role);
-    if (err) return res.status(err.status).json({ message: err.message });
-
-    const { action, comment } = req.body || {};
-    if (!action) return res.status(400).json({ message: "action is required" });
-
-    const instance = await workflowSvc.getInstanceForEntity(req.params.leaveId, "leave");
-    if (!instance) return res.status(404).json({ message: "No workflow instance for this leave" });
-
-    const { instance: updated, advancedTo } = await workflowSvc.advanceStage(
-      instance._id,
-      action,
-      req.userId,
-      comment || ""
-    );
-
-    await syncEntityStatus(
-      req.params.leaveId,
-      "leave",
-      updated.overallStatus,
-      caller.name,
-      entity.student
-    );
-
-    res.json({
-      message:       `Stage action "${action}" recorded`,
-      advancedTo,
-      overallStatus: updated.overallStatus,
-      workflow:      await workflowSvc.getWorkflowStatus(req.params.leaveId, "leave"),
-    });
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ message: err.message });
-    next(err);
-  }
-});
+// ── Routes ────────────────────────────────────────────────────────────────────
+router.get("/requests/:requestId/workflow",         requireAuth, makeStatusHandler("request"));
+router.post("/requests/:requestId/workflow/advance",requireAuth, idempotency(), makeAdvanceHandler("request"));
+router.get("/leave/:leaveId/workflow",              requireAuth, makeStatusHandler("leave"));
+router.post("/leave/:leaveId/workflow/advance",     requireAuth, idempotency(), makeAdvanceHandler("leave"));
 
 module.exports = router;

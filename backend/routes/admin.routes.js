@@ -396,8 +396,23 @@ router.get("/analytics", guard, async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
-router.get("/requests", guard, async (req, res, next) => {
+// ── GET /api/admin/workflow-metrics — Feature 10 ──────────────────────────────
+router.get("/workflow-metrics", guard, async (req, res, next) => {
   try {
+    const workflowSvc = require("../services/workflow.service");
+    const Leave       = require("../models/Leave");
+    const [wfMetrics, leaveStats] = await Promise.all([
+      workflowSvc.getWorkflowMetrics(),
+      Leave.aggregate([
+        { $group: { _id: "$status", count: { $sum: 1 }, totalDays: { $sum: "$totalDays" } } },
+      ]),
+    ]);
+    const leaveMap = Object.fromEntries(leaveStats.map((s) => [s._id, { count: s.count, totalDays: s.totalDays }]));
+    res.json({ workflowMetrics: wfMetrics, leaveMetrics: leaveMap });
+  } catch (err) { next(err); }
+});
+
+router.get("/requests", guard, async (req, res, next) => {  try {
     const { status, type, page = "1", limit = "20" } = req.query;
     const { STATUSES: S, REQUEST_TYPES: T } = require("../models/Request");
 

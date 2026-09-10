@@ -2672,3 +2672,709 @@ describe("PATCH /api/admin/users/:id/advisor", () => {
     expect(leaveRes.body.leave.reviewedBy.toString()).toBe(facultyId);
   });
 });
+
+
+// =============================================================================
+// ADVANCED FEATURES TESTS (Features 1-10)
+// =============================================================================
+
+const AuditLog       = require("../models/AuditLog");
+const Notification   = require("../models/Notification");
+const IdempotencyKey = require("../models/IdempotencyKey");
+const notifSvc       = require("../services/notification.service");
+const auditSvc       = require("../services/audit.service");
+const { evaluateCondition, resolveConditionalTarget } = require("../services/workflow.service");
+
+// ── Reusable helpers ──────────────────────────────────────────────────────────
+
+async function makeAdv(email, role = "student") {
+  const ag = request.agent(app);
+  const r  = await ag.post("/api/register").send({ name: "AdvUser", email, password: "pass1234" });
+  expect(r.status).toBe(201);
+  if (role !== "student") {
+    await User.findByIdAndUpdate(r.body.user.id, { role });
+    await ag.post("/api/login").send({ email, password: "pass1234" });
+  }
+  return { agent: ag, userId: r.body.user.id };
+}
+
+function parallelTemplate(overrides = {}) {
+  return {
+    name:           "Parallel WF " + Date.now(),
+    entityKind:     "request",
+    appliesToTypes: [],
+    isActive:       false,
+    stages: [
+      {
+        order: 1, name: "Multi Approval",
+        stageType: "parallel",
+        assigneeRole: "faculty",
+        allowedActions: ["approve","reject"],
+        parallelQuorum: 2,
+        slaHours: 24,
+        requiresComment: false,
+        autoAdvance: false,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function conditionalTemplate(overrides = {}) {
+  return {
+    name:           "Conditional WF " + Date.now(),
+    entityKind:     "request",
+    appliesToTypes: [],
+    isActive:       false,
+    stages: [
+      {
+        order: 1, name: "Initial Review",
+        assigneeRole: "faculty",
+        allowedActions: ["approve","reject"],
+        slaHours: 24,
+        conditions: [
+          { field: "priority", operator: "eq", value: "urgent", targetStageOrder: 3 }
+        ],
+      },
+      {
+        order: 2, name: "Normal Stage",
+        assigneeRole: "hod",
+        allowedActions: ["approve","reject"],
+        slaHours: 48,
+        conditions: [],
+      },
+      {
+        order: 3, name: "Urgent Fast Track",
+        assigneeRole: "admin",
+        allowedActions: ["approve","reject"],
+        slaHours: 4,
+        conditions: [],
+      },
+    ],
+    ...overrides,
+  };
+}
+
+// =============================================================================
+// Feature 1: Advanced Workflow Engine — stageType field, version history
+// =============================================================================
+
+describe("Feature 1: Advanced Workflow Engine", () => {
+  let adminAgent, adminId;
+
+  beforeEach(async () => {
+    const a = await makeAdv("f1adm@test.com", "admin");
+    adminAgent = a.agent; adminId = a.userId;
+  });
+
+  it("admin can create a template with stageType=parallel", async () => {
+    const res = await adminAgent.post("/api/admin/workflow-templates").send(parallelTemplate());
+    expect(res.status).toBe(201);
+    expect(res.body.template.stages[0].stageType).toBe("parallel");
+  });
+
+  it("admin can create a template with stageType=sequential (default)", async () => {
+    const res = await adminAgent.post("/api/admin/workflow-templates").send({
+      name: "Seq WF " + Date.now(), entityKind: "request", isActive: false,
+      stages: [{ order:1, name:"Step", assigneeRole:"faculty", allowedActions:["approve","reject"], slaHours:24 }],
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.template.stages[0].stageType).toBe("sequential");
+  });
+
+  it("invalid stageType returns 400", async () => {
+    const res = await adminAgent.post("/api/admin/workflow-templates").send({
+      name: "Bad WF " + Date.now(), entityKind: "request", isActive: false,
+      stages: [{ order:1, name:"X", assigneeRole:"faculty", allowedActions:["approve"], stageType:"invalid" }],
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+// =============================================================================
+// Feature 2: Conditional Workflow Transitions
+// =============================================================================
+
+describe("Feature 2: Conditional Transitions — evaluateCondition()", () => {
+  it("eq operator matches correctly", () => {
+    expect(evaluateCondition({ field:"priority", operator:"eq", value:"urgent" }, { priority:"urgent" })).toBe(true);
+    expect(evaluateCondition({ field:"priority", operator:"eq", value:"urgent" }, { priority:"normal" })).toBe(false);
+  });
+  it("neq operator works", () => {
+    expect(evaluateCondition({ field:"type", operator:"neq", value:"general" }, { type:"transcript" })).toBe(true);
+  });
+  it("in operator works", () => {
+    expect(evaluateCondition({ field:"priority", operator:"in", value:["high","urgent"] }, { priority:"urgent" })).toBe(true);
+    expect(evaluateCondition({ field:"priority", operator:"in", value:["high","urgent"] }, { priority:"low" })).toBe(false);
+  });
+  it("gt / lt operators work", () => {
+    expect(evaluateCondition({ field:"totalDays", operator:"gt", value:5 }, { totalDays:7 })).toBe(true);
+    expect(evaluateCondition({ field:"totalDays", operator:"lt", value:5 }, { totalDays:3 })).toBe(true);
+  });
+  it("returns false for missing field", () => {
+    expect(evaluateCondition({ field:"missing", operator:"eq", value:"x" }, {})).toBe(false);
+  });
+  it("resolveConditionalTarget returns null when no conditions match", () => {
+    const result = resolveConditionalTarget(
+      [{ field:"priority", operator:"eq", value:"urgent", targetStageOrder:3 }],
+      { priority:"normal" }
+    );
+    expect(result).toBeNull();
+  });
+  it("resolveConditionalTarget returns targetStageOrder when matched", () => {
+    const result = resolveConditionalTarget(
+      [{ field:"priority", operator:"eq", value:"urgent", targetStageOrder:3 }],
+      { priority:"urgent" }
+    );
+    expect(result).toBe(3);
+  });
+  it("admin can create template with conditions array on a stage", async () => {
+    const { agent } = await makeAdv("f2adm@test.com","admin");
+    const res = await agent.post("/api/admin/workflow-templates").send(conditionalTemplate());
+    expect(res.status).toBe(201);
+    const stage = res.body.template.stages[0];
+    expect(Array.isArray(stage.conditions)).toBe(true);
+    expect(stage.conditions[0].field).toBe("priority");
+  });
+});
+
+// =============================================================================
+// Feature 3: Parallel Approvals
+// =============================================================================
+
+describe("Feature 3: Parallel Approvals", () => {
+  it("parallel stage template stores parallelQuorum", async () => {
+    const { agent } = await makeAdv("f3adm@test.com","admin");
+    const res = await agent.post("/api/admin/workflow-templates").send(parallelTemplate());
+    expect(res.status).toBe(201);
+    expect(res.body.template.stages[0].parallelQuorum).toBe(2);
+  });
+
+  it("workflow service: parallel stage resolves after quorum votes", async () => {
+    const workflowSvc = require("../services/workflow.service");
+
+    // Create faculty users
+    const f1 = await User.create({ name:"F1", email:"pf1@t.com", password:"x", role:"faculty" });
+    const f2 = await User.create({ name:"F2", email:"pf2@t.com", password:"x", role:"faculty" });
+    const student = await User.create({ name:"S", email:"ps@t.com", password:"x", role:"student" });
+
+    const tpl = await WorkflowTemplate.create({
+      name: "ParallelTest", entityKind:"request", isActive:false,
+      stages:[{
+        order:1, name:"Parallel Stage", stageType:"parallel",
+        assigneeRole:"faculty", allowedActions:["approve","reject"],
+        parallelQuorum:2, slaHours:24,
+      }],
+    });
+
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await workflowSvc.createInstance(entityId,"request",tpl._id,student._id);
+    expect(instance.stages[0].stageType).toBe("parallel");
+
+    // First vote — quorum not met yet (need 2)
+    const { advancedTo: adv1 } = await workflowSvc.advanceStage(instance._id,"approve",f1._id,"");
+    expect(adv1).toMatch(/pending/i);
+
+    // Second vote — quorum met, workflow advances
+    const { instance: after } = await workflowSvc.advanceStage(instance._id,"approve",f2._id,"");
+    expect(after.overallStatus).toBe("approved");
+  });
+
+  it("parallel stage: single rejection immediately rejects (fail-fast)", async () => {
+    const workflowSvc = require("../services/workflow.service");
+    const f1 = await User.create({ name:"FR1", email:"pfr1@t.com", password:"x", role:"faculty" });
+    const student = await User.create({ name:"SR", email:"psr@t.com", password:"x", role:"student" });
+
+    const tpl = await WorkflowTemplate.create({
+      name:"ParReject", entityKind:"request", isActive:false,
+      stages:[{ order:1, name:"Par Stage", stageType:"parallel", assigneeRole:"faculty",
+        allowedActions:["approve","reject"], parallelQuorum:2, slaHours:24 }],
+    });
+    const entityId = new mongoose.Types.ObjectId();
+    const inst = await workflowSvc.createInstance(entityId,"request",tpl._id,student._id);
+    const { instance: after } = await workflowSvc.advanceStage(inst._id,"reject",f1._id,"Not good");
+    expect(after.overallStatus).toBe("rejected");
+  });
+
+  it("same user cannot vote twice on parallel stage (409)", async () => {
+    const workflowSvc = require("../services/workflow.service");
+    const f1 = await User.create({ name:"FD1", email:"pfd1@t.com", password:"x", role:"faculty" });
+    const student = await User.create({ name:"SD", email:"psd@t.com", password:"x", role:"student" });
+
+    const tpl = await WorkflowTemplate.create({
+      name:"ParDupe", entityKind:"request", isActive:false,
+      stages:[{ order:1, name:"Par", stageType:"parallel", assigneeRole:"faculty",
+        allowedActions:["approve","reject"], parallelQuorum:3, slaHours:24 }],
+    });
+    const entityId = new mongoose.Types.ObjectId();
+    const inst = await workflowSvc.createInstance(entityId,"request",tpl._id,student._id);
+    await workflowSvc.advanceStage(inst._id,"approve",f1._id,"");
+    await expect(workflowSvc.advanceStage(inst._id,"approve",f1._id,""))
+      .rejects.toMatchObject({ status:409 });
+  });
+});
+
+// =============================================================================
+// Feature 4: Workflow Versioning
+// =============================================================================
+
+describe("Feature 4: Workflow Versioning", () => {
+  let adminAgent;
+  beforeEach(async () => { const a = await makeAdv("f4adm@test.com","admin"); adminAgent = a.agent; });
+
+  it("PUT bumps version and saves to versionHistory", async () => {
+    const cr = await adminAgent.post("/api/admin/workflow-templates").send({
+      name:"VersionTest " + Date.now(), entityKind:"request", isActive:false,
+      stages:[{ order:1, name:"Step1", assigneeRole:"faculty", allowedActions:["approve","reject"], slaHours:24 }],
+    });
+    expect(cr.status).toBe(201);
+    const id = cr.body.template._id;
+    const v1 = cr.body.template.version;
+
+    const upd = await adminAgent.put(`/api/admin/workflow-templates/${id}`).send({
+      name:"VersionTest Updated", stages:[{ order:1, name:"Step1 Updated", assigneeRole:"faculty",
+        allowedActions:["approve"], slaHours:12 }],
+      versionNote: "Updated step name",
+    });
+    expect(upd.status).toBe(200);
+    expect(upd.body.template.version).toBe(v1 + 1);
+  });
+
+  it("GET /:id/history returns version history", async () => {
+    const cr = await adminAgent.post("/api/admin/workflow-templates").send({
+      name:"HistTest " + Date.now(), entityKind:"request", isActive:false,
+      stages:[{ order:1, name:"S1", assigneeRole:"faculty", allowedActions:["approve"], slaHours:24 }],
+    });
+    const id = cr.body.template._id;
+    // Make an edit so history has an entry
+    await adminAgent.put(`/api/admin/workflow-templates/${id}`).send({
+      stages:[{ order:1, name:"S1 v2", assigneeRole:"faculty", allowedActions:["approve"], slaHours:24 }],
+      versionNote:"v2",
+    });
+    const res = await adminAgent.get(`/api/admin/workflow-templates/${id}/history`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.template.versionHistory)).toBe(true);
+    expect(res.body.template.versionHistory.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("in-flight instance keeps old snapshot after template update", async () => {
+    const faculty = await User.create({ name:"FV", email:"fv@t.com", password:"x", role:"faculty" });
+    const student = await User.create({ name:"SV", email:"sv@t.com", password:"x", role:"student" });
+
+    const cr = await adminAgent.post("/api/admin/workflow-templates").send({
+      name:"SnapTest " + Date.now(), entityKind:"request", isActive:false,
+      stages:[{ order:1, name:"Original Stage", assigneeRole:"faculty", allowedActions:["approve"], slaHours:24 }],
+    });
+    const id = cr.body.template._id;
+
+    const workflowSvc = require("../services/workflow.service");
+    const entityId    = new mongoose.Types.ObjectId();
+    const instance    = await workflowSvc.createInstance(entityId,"request",id,student._id);
+    expect(instance.templateSnapshot.version).toBe(1);
+    expect(instance.stages[0].stageName).toBe("Original Stage");
+
+    // Update template
+    await adminAgent.put(`/api/admin/workflow-templates/${id}`).send({
+      stages:[{ order:1, name:"NEW Stage Name", assigneeRole:"hod", allowedActions:["approve"], slaHours:12 }],
+    });
+
+    // Instance is unchanged
+    const reloaded = await WorkflowInstance.findById(instance._id).lean();
+    expect(reloaded.templateSnapshot.version).toBe(1);
+    expect(reloaded.stages[0].stageName).toBe("Original Stage");
+  });
+});
+
+// =============================================================================
+// Feature 5: SLA Monitoring & Escalation
+// =============================================================================
+
+describe("Feature 5: SLA Monitoring", () => {
+  it("workflow SLA breach scan marks stage slaBreached", async () => {
+    const workflowSvc = require("../services/workflow.service");
+    const student = await User.create({ name:"SlaS", email:"slas@t.com", password:"x", role:"student" });
+    const tpl = await WorkflowTemplate.create({
+      name:"SlaTest", entityKind:"request", isActive:false,
+      stages:[{ order:1, name:"SLA Stage", assigneeRole:"faculty", allowedActions:["approve"], slaHours:1 }],
+    });
+    const entityId = new mongoose.Types.ObjectId();
+    const inst = await workflowSvc.createInstance(entityId,"request",tpl._id,student._id);
+
+    // Force deadline to past
+    await WorkflowInstance.findByIdAndUpdate(inst._id, { "stages.0.slaDeadline": new Date(Date.now()-1000) });
+
+    const stats = await workflowSvc.checkSLABreaches();
+    expect(stats.breached).toBeGreaterThanOrEqual(1);
+
+    const updated = await WorkflowInstance.findById(inst._id).lean();
+    expect(updated.stages[0].slaBreached).toBe(true);
+  });
+
+  it("SLA warning is sent at 75% threshold (slaWarned flag set)", async () => {
+    const workflowSvc = require("../services/workflow.service");
+    const student = await User.create({ name:"WarnS", email:"warns@t.com", password:"x", role:"student" });
+    const tpl = await WorkflowTemplate.create({
+      name:"WarnTest", entityKind:"request", isActive:false,
+      stages:[{ order:1, name:"Warn Stage", assigneeRole:"faculty", allowedActions:["approve"], slaHours:4 }],
+    });
+    const entityId = new mongoose.Types.ObjectId();
+    const inst = await workflowSvc.createInstance(entityId,"request",tpl._id,student._id);
+
+    // Set enteredAt to 80% of sla elapsed (3.2h ago for 4h SLA)
+    const enteredAt = new Date(Date.now() - 3.2 * 3600000);
+    await WorkflowInstance.findByIdAndUpdate(inst._id, {
+      "stages.0.enteredAt":   enteredAt,
+      "stages.0.slaDeadline": new Date(enteredAt.getTime() + 4 * 3600000),
+      "stages.0.slaWarned":   false,
+    });
+
+    const stats = await workflowSvc.checkSLABreaches();
+    expect(stats.warned).toBeGreaterThanOrEqual(1);
+    const updated = await WorkflowInstance.findById(inst._id).lean();
+    expect(updated.stages[0].slaWarned).toBe(true);
+  });
+
+  it("escalation job marks request slaBreached and escalates", async () => {
+    const { runEscalationCheck } = require("../jobs/escalation.job");
+    const Request = require("../models/Request");
+
+    const st = request.agent(app);
+    await st.post("/api/register").send({ name:"EscSt", email:"escst5@t.com", password:"pass1234" });
+    const cr = await st.post("/api/requests").send({
+      type:"general", description:"Escalation SLA test request", priority:"urgent",
+    });
+    const id = cr.body.request._id;
+    await Request.findByIdAndUpdate(id, { slaDeadline: new Date(Date.now()-1000) });
+
+    const stats = await runEscalationCheck();
+    expect(stats.breached).toBeGreaterThanOrEqual(1);
+    expect(stats.escalated).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// =============================================================================
+// Feature 6: Notification Center
+// =============================================================================
+
+describe("Feature 6: Notification Center", () => {
+  it("GET /api/notifications returns 401 when not authenticated", async () => {
+    const res = await request(app).get("/api/notifications");
+    expect(res.status).toBe(401);
+  });
+
+  it("GET /api/notifications returns empty list for new user", async () => {
+    const { agent } = await makeAdv("notif1@t.com");
+    const res = await agent.get("/api/notifications");
+    expect(res.status).toBe(200);
+    expect(res.body.notifications).toHaveLength(0);
+    expect(res.body.unreadCount).toBe(0);
+  });
+
+  it("notificationService.createNotification creates a DB record", async () => {
+    const user = await User.create({ name:"NUser", email:"nu@t.com", password:"x", role:"student" });
+    const notif = await notifSvc.createNotification({
+      userId:     user._id,
+      type:       "system",
+      title:      "Test notification",
+      body:       "Test body",
+      entityKind: "system",
+    });
+    expect(notif).not.toBeNull();
+    expect(notif.title).toBe("Test notification");
+    const inDb = await Notification.findById(notif._id).lean();
+    expect(inDb).not.toBeNull();
+    expect(inDb.read).toBe(false);
+  });
+
+  it("GET /api/notifications/unread-count returns correct count", async () => {
+    const { agent, userId } = await makeAdv("notif2@t.com");
+    await notifSvc.createNotification({ userId, type:"system", title:"A", entityKind:"system" });
+    await notifSvc.createNotification({ userId, type:"system", title:"B", entityKind:"system" });
+    const res = await agent.get("/api/notifications/unread-count");
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(2);
+  });
+
+  it("PATCH /api/notifications/:id/read marks one notification read", async () => {
+    const { agent, userId } = await makeAdv("notif3@t.com");
+    const n = await notifSvc.createNotification({ userId, type:"system", title:"Mark Me", entityKind:"system" });
+    const res = await agent.patch(`/api/notifications/${n._id}/read`);
+    expect(res.status).toBe(200);
+    expect(res.body.notification.read).toBe(true);
+  });
+
+  it("PATCH /api/notifications/read-all marks all notifications read", async () => {
+    const { agent, userId } = await makeAdv("notif4@t.com");
+    await notifSvc.createNotification({ userId, type:"system", title:"N1", entityKind:"system" });
+    await notifSvc.createNotification({ userId, type:"system", title:"N2", entityKind:"system" });
+    const res = await agent.patch("/api/notifications/read-all");
+    expect(res.status).toBe(200);
+    const count = await Notification.countDocuments({ userId, read:false });
+    expect(count).toBe(0);
+  });
+
+  it("DELETE /api/notifications/:id deletes own notification", async () => {
+    const { agent, userId } = await makeAdv("notif5@t.com");
+    const n = await notifSvc.createNotification({ userId, type:"system", title:"Delete Me", entityKind:"system" });
+    const res = await agent.delete(`/api/notifications/${n._id}`);
+    expect(res.status).toBe(200);
+    const inDb = await Notification.findById(n._id);
+    expect(inDb).toBeNull();
+  });
+
+  it("cannot read another user's notification (404)", async () => {
+    const { userId: uid1 } = await makeAdv("notif6a@t.com");
+    const { agent: agent2 } = await makeAdv("notif6b@t.com");
+    const n = await notifSvc.createNotification({ userId: uid1, type:"system", title:"Private", entityKind:"system" });
+    const res = await agent2.patch(`/api/notifications/${n._id}/read`);
+    expect(res.status).toBe(404);
+  });
+
+  it("GET /api/notifications?unread=true returns only unread", async () => {
+    const { agent, userId } = await makeAdv("notif7@t.com");
+    const n1 = await notifSvc.createNotification({ userId, type:"system", title:"Unread", entityKind:"system" });
+    const n2 = await notifSvc.createNotification({ userId, type:"system", title:"Read", entityKind:"system" });
+    await Notification.findByIdAndUpdate(n2._id, { read:true });
+    const res = await agent.get("/api/notifications?unread=true");
+    expect(res.status).toBe(200);
+    expect(res.body.notifications.every((n) => !n.read)).toBe(true);
+    expect(res.body.notifications.some((n) => n._id === n1._id.toString())).toBe(true);
+  });
+});
+
+// =============================================================================
+// Feature 7: Audit Trail
+// =============================================================================
+
+describe("Feature 7: Audit Trail", () => {
+  it("GET /api/admin/audit-trail returns 403 for non-admin", async () => {
+    const { agent } = await makeAdv("aud1@t.com","student");
+    const res = await agent.get("/api/admin/audit-trail");
+    expect(res.status).toBe(403);
+  });
+
+  it("GET /api/admin/audit-trail returns 401 for unauthenticated", async () => {
+    const res = await request(app).get("/api/admin/audit-trail");
+    expect(res.status).toBe(401);
+  });
+
+  it("writeAudit creates an AuditLog record", async () => {
+    const user = await User.create({ name:"AU", email:"au@t.com", password:"x", role:"admin" });
+    await auditSvc.writeAudit({
+      actorId:   user._id,
+      actorName: user.name,
+      actorRole: "admin",
+      action:    "test.audit_write",
+      entityKind:"system",
+    });
+    const log = await AuditLog.findOne({ action:"test.audit_write" }).lean();
+    expect(log).not.toBeNull();
+    expect(log.actorRole).toBe("admin");
+  });
+
+  it("GET /api/admin/audit-trail returns paginated logs for admin", async () => {
+    const { agent, userId } = await makeAdv("aud2@t.com","admin");
+    // Write some audit entries
+    await auditSvc.writeAudit({ actorId:userId, actorName:"AudAdmin", actorRole:"admin",
+      action:"request.status_changed", entityKind:"request" });
+    await auditSvc.writeAudit({ actorId:userId, actorName:"AudAdmin", actorRole:"admin",
+      action:"workflow.approve", entityKind:"workflow_instance" });
+
+    const res = await agent.get("/api/admin/audit-trail");
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.logs)).toBe(true);
+    expect(res.body.pagination).toBeDefined();
+  });
+
+  it("audit trail can be filtered by entityKind", async () => {
+    const { agent, userId } = await makeAdv("aud3@t.com","admin");
+    await auditSvc.writeAudit({ actorId:userId, actorName:"X", actorRole:"admin",
+      action:"leave.approved", entityKind:"leave" });
+
+    const res = await agent.get("/api/admin/audit-trail?entityKind=leave");
+    expect(res.status).toBe(200);
+    expect(res.body.logs.every((l) => l.entityKind === "leave")).toBe(true);
+  });
+
+  it("audit trail can be filtered by action keyword", async () => {
+    const { agent, userId } = await makeAdv("aud4@t.com","admin");
+    await auditSvc.writeAudit({ actorId:userId, actorName:"X", actorRole:"admin",
+      action:"workflow.special_action_xyz", entityKind:"workflow_instance" });
+    const res = await agent.get("/api/admin/audit-trail?action=special_action_xyz");
+    expect(res.status).toBe(200);
+    expect(res.body.logs.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// =============================================================================
+// Feature 8: Idempotency
+// =============================================================================
+
+describe("Feature 8: Idempotency", () => {
+  it("same Idempotency-Key returns cached response on duplicate POST", async () => {
+    const { agent } = await makeAdv("idem1@t.com","student");
+    const key = "test-idem-key-" + Date.now();
+    const payload = { type:"general", description:"Idempotency test request body", priority:"normal" };
+
+    const r1 = await agent.post("/api/requests").set("Idempotency-Key", key).send(payload);
+    expect(r1.status).toBe(201);
+    const id1 = r1.body.request?._id;
+
+    // Duplicate — same key, same result
+    const r2 = await agent.post("/api/requests").set("Idempotency-Key", key).send(payload);
+    expect(r2.status).toBe(201);
+    expect(r2.body._idempotent).toBe(true);
+    // Should return same request id
+    expect(r2.body.request?._id).toBe(id1);
+  });
+
+  it("different Idempotency-Key creates a new resource", async () => {
+    const { agent } = await makeAdv("idem2@t.com","student");
+    const payload = { type:"general", description:"Two separate idem requests here", priority:"normal" };
+
+    const r1 = await agent.post("/api/requests").set("Idempotency-Key","key-a-"+Date.now()).send(payload);
+    const r2 = await agent.post("/api/requests").set("Idempotency-Key","key-b-"+Date.now()).send(payload);
+    expect(r1.status).toBe(201);
+    expect(r2.status).toBe(201);
+    expect(r1.body.request._id).not.toBe(r2.body.request._id);
+  });
+
+  it("no Idempotency-Key header — no caching, normal behaviour", async () => {
+    const { agent } = await makeAdv("idem3@t.com","student");
+    const payload = { type:"general", description:"No idempotency key on this one", priority:"normal" };
+    const r1 = await agent.post("/api/requests").send(payload);
+    const r2 = await agent.post("/api/requests").send(payload);
+    expect(r1.status).toBe(201);
+    expect(r2.status).toBe(201);
+    expect(r1.body._idempotent).toBeUndefined();
+    expect(r2.body._idempotent).toBeUndefined();
+  });
+
+  it("IdempotencyKey model stores keyHash and response", async () => {
+    const crypto = require("crypto");
+    const user   = await User.create({ name:"IK", email:"ik@t.com", password:"x", role:"student" });
+    const raw    = "manual-key-" + Date.now();
+    const hash   = crypto.createHash("sha256").update(`${user._id}:${raw}`).digest("hex");
+    await IdempotencyKey.create({
+      keyHash:    hash,
+      userId:     user._id,
+      path:       "/api/requests",
+      method:     "POST",
+      statusCode: 201,
+      response:   { test: true },
+      expiresAt:  new Date(Date.now() + 86400000),
+    });
+    const found = await IdempotencyKey.findOne({ keyHash: hash }).lean();
+    expect(found).not.toBeNull();
+    expect(found.response.test).toBe(true);
+  });
+});
+
+// =============================================================================
+// Feature 9: Concurrency Control
+// =============================================================================
+
+describe("Feature 9: Concurrency Control", () => {
+  it("advanceStage throws 409 on stale __v (optimistic lock)", async () => {
+    const { saveWithLock } = require("../services/workflow.service");
+    const faculty  = await User.create({ name:"CFC",  email:"cfc@t.com",  password:"x", role:"faculty" });
+    const faculty2 = await User.create({ name:"CFC2", email:"cfc2@t.com", password:"x", role:"faculty" });
+    const student  = await User.create({ name:"CSC",  email:"csc@t.com",  password:"x", role:"student" });
+
+    const tpl = await WorkflowTemplate.create({
+      name:"ConcTest", entityKind:"request", isActive:false,
+      stages:[
+        { order:1, name:"Lock Stage", assigneeRole:"faculty", allowedActions:["approve","reject"], slaHours:24 },
+        { order:2, name:"Stage 2",    assigneeRole:"hod",     allowedActions:["approve","reject"], slaHours:24 },
+      ],
+    });
+    const entityId = new mongoose.Types.ObjectId();
+    const instance = await require("../services/workflow.service").createInstance(entityId,"request",tpl._id,student._id);
+
+    // Load two in-memory copies at the SAME __v
+    const copy1 = await WorkflowInstance.findById(instance._id);
+    const copy2 = await WorkflowInstance.findById(instance._id);
+
+    expect(copy1.__v).toBe(copy2.__v);
+
+    // Advance copy1 via saveWithLock — increments __v in DB to 1
+    copy1.stages[0].status      = "completed";
+    copy1.stages[0].action      = "approve";
+    copy1.stages[0].actorId     = faculty._id;
+    copy1.stages[0].actorName   = "CFC";
+    copy1.stages[0].completedAt = new Date();
+    copy1.stages[1].status      = "in_progress";
+    copy1.stages[1].enteredAt   = new Date();
+    copy1.currentStageIndex     = 1;
+    copy1.markModified("stages");
+    const saved1 = await saveWithLock(copy1);
+    expect(saved1.__v).toBe(copy1.__v + 1); // __v was incremented
+
+    // Now try copy2 (still has old __v) — filter { __v: oldVersion } misses → 409
+    copy2.stages[0].status      = "completed";
+    copy2.stages[0].action      = "reject";
+    copy2.stages[0].actorId     = faculty2._id;
+    copy2.stages[0].actorName   = "CFC2";
+    copy2.stages[0].completedAt = new Date();
+    copy2.markModified("stages");
+
+    await expect(saveWithLock(copy2)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("WorkflowInstance has __v field (versionKey enabled)", async () => {
+    const workflowSvc = require("../services/workflow.service");
+    const student = await User.create({ name:"CVS", email:"cvs@t.com", password:"x", role:"student" });
+    const tpl = await WorkflowTemplate.create({
+      name:"VkeyTest", entityKind:"request", isActive:false,
+      stages:[{ order:1, name:"S", assigneeRole:"faculty", allowedActions:["approve"], slaHours:24 }],
+    });
+    const entityId = new mongoose.Types.ObjectId();
+    const inst = await workflowSvc.createInstance(entityId,"request",tpl._id,student._id);
+    expect(inst.__v).toBeDefined();
+    expect(typeof inst.__v).toBe("number");
+  });
+});
+
+// =============================================================================
+// Feature 10: Analytics Dashboard — workflow metrics endpoint
+// =============================================================================
+
+describe("Feature 10: Analytics Dashboard — workflow metrics", () => {
+  let adminAgent;
+  beforeEach(async () => { const a = await makeAdv("f10adm@test.com","admin"); adminAgent = a.agent; });
+
+  it("GET /api/admin/workflow-metrics returns metrics for admin", async () => {
+    const res = await adminAgent.get("/api/admin/workflow-metrics");
+    expect(res.status).toBe(200);
+    expect(res.body.workflowMetrics).toBeDefined();
+    expect(typeof res.body.workflowMetrics.total).toBe("number");
+    expect(typeof res.body.workflowMetrics.slaBreachRate).toBe("number");
+    expect(typeof res.body.workflowMetrics.avgStagesPerFlow).toBe("number");
+    expect(res.body.workflowMetrics.byStatus).toBeDefined();
+  });
+
+  it("GET /api/admin/workflow-metrics returns leaveMetrics", async () => {
+    const res = await adminAgent.get("/api/admin/workflow-metrics");
+    expect(res.status).toBe(200);
+    expect(res.body.leaveMetrics).toBeDefined();
+  });
+
+  it("GET /api/admin/workflow-metrics returns 403 for student", async () => {
+    const { agent } = await makeAdv("f10st@test.com","student");
+    const res = await agent.get("/api/admin/workflow-metrics");
+    expect(res.status).toBe(403);
+  });
+
+  it("GET /api/admin/workflow-metrics returns 401 for unauthenticated", async () => {
+    const res = await request(app).get("/api/admin/workflow-metrics");
+    expect(res.status).toBe(401);
+  });
+
+  it("getWorkflowMetrics() returns valid structure", async () => {
+    const workflowSvc = require("../services/workflow.service");
+    const metrics = await workflowSvc.getWorkflowMetrics();
+    expect(typeof metrics.total).toBe("number");
+    expect(typeof metrics.slaBreachRate).toBe("number");
+    expect(metrics.byStatus).toBeDefined();
+  });
+});

@@ -192,6 +192,11 @@ const requestSchema = new mongoose.Schema(
       type:    Boolean,
       default: false,
     },
+    // True once a SLA warning notification has been sent (Feature 5)
+    slaWarned: {
+      type:    Boolean,
+      default: false,
+    },
 
     // ── Configurable Workflow Engine (optional) ───────────────────────────────
     // Null for legacy requests (flat status workflow applies).

@@ -24,6 +24,9 @@ const leaveTypeRoutes = require("./routes/leaveType.routes");
 const workflowInstanceRoutes = require("./routes/workflowInstance.routes");
 const configRoutes           = require("./routes/config.routes");
 const departmentRoutes       = require("./routes/department.routes");
+// ── Advanced features ─────────────────────────────────────────────────────────
+const notificationsRoutes = require("./routes/notifications.routes");
+const auditTrailRoutes    = require("./routes/auditTrail.routes");
 
 const { initSocket }     = require("./socket/socketHandler");
 const { startEscalationJob } = require("./jobs/escalation.job");
@@ -199,6 +202,9 @@ app.use("/api/leave-types", leaveTypeRoutes);
 app.use("/api",             workflowInstanceRoutes);
 app.use("/api/config",      configRoutes);
 app.use("/api/admin/departments", departmentRoutes);
+// ── Advanced feature routes ───────────────────────────────────────────────────
+app.use("/api/notifications",     notificationsRoutes);
+app.use("/api/admin/audit-trail", auditTrailRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

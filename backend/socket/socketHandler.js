@@ -23,6 +23,12 @@ const jwt        = require("jsonwebtoken");
 const cookie     = require("cookie");
 
 let io = null;
+// Lazy-require to avoid circular deps at module load
+let _notifSvc = null;
+function getNotifSvc() {
+  if (!_notifSvc) _notifSvc = require("../services/notification.service");
+  return _notifSvc;
+}
 
 function initSocket(httpServer, { frontendUrl, jwtSecret }) {
   io = new Server(httpServer, {
@@ -30,21 +36,15 @@ function initSocket(httpServer, { frontendUrl, jwtSecret }) {
       origin:      frontendUrl || "http://localhost:3000",
       credentials: true,
     },
-    // Keep Socket.io path as default /socket.io
   });
 
   // ── Auth middleware ────────────────────────────────────────────────────────
-  // Verify the JWT from the httpOnly cookie before accepting the connection.
   io.use((socket, next) => {
     try {
       const rawCookie = socket.handshake.headers.cookie || "";
       const cookies   = cookie.parse(rawCookie);
       const token     = cookies["token"];
-
-      if (!token) {
-        return next(new Error("Not authenticated"));
-      }
-
+      if (!token) return next(new Error("Not authenticated"));
       const payload   = jwt.verify(token, jwtSecret);
       socket.userId   = payload.id;
       next();
@@ -55,22 +55,18 @@ function initSocket(httpServer, { frontendUrl, jwtSecret }) {
 
   // ── Connection handler ─────────────────────────────────────────────────────
   io.on("connection", async (socket) => {
-    // Join the user's private room immediately
     socket.join(`user:${socket.userId}`);
 
-    // Client sends its role so we can place it in the role room
-    // (role is trusted from the server's perspective — verified from DB in route handlers)
     socket.on("JOIN_ROLE_ROOM", (role) => {
       const validRoles = ["student", "faculty", "hod", "admin"];
-      if (validRoles.includes(role)) {
-        socket.join(`role:${role}`);
-      }
+      if (validRoles.includes(role)) socket.join(`role:${role}`);
     });
 
-    socket.on("disconnect", () => {
-      // cleanup is automatic — Socket.io removes the socket from all rooms
-    });
+    socket.on("disconnect", () => {});
   });
+
+  // Wire io into notification service so it can push real-time events
+  getNotifSvc().setIO(io);
 
   return io;
 }

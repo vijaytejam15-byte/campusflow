@@ -1,44 +1,53 @@
 /**
  * WorkflowTemplate — admin-configured multi-stage approval template.
  *
- * A template defines an ordered sequence of stages. When a Request or Leave
- * is submitted and a matching active template exists for its type, a
- * WorkflowInstance is created from this template (snapshot).
- *
- * Backward compatibility: existing requests with no workflowInstanceId
- * continue to use the legacy flat status workflow unaffected.
+ * Upgraded with:
+ *   - stageType: "sequential" | "parallel"  (Feature 3: Parallel Approvals)
+ *   - conditions: rule-based routing rules  (Feature 2: Conditional Transitions)
+ *   - parallelQuorum: min approvals needed  (Feature 3)
+ *   - version history tracking             (Feature 4: Workflow Versioning)
  */
+"use strict";
 const mongoose = require("mongoose");
 
-// ── Stage sub-schema ──────────────────────────────────────────────────────────
+// ── Condition schema (Feature 2: Conditional Transitions) ────────────────────
+// Evaluates entity fields to decide which stage to route to next.
+const conditionSchema = new mongoose.Schema(
+  {
+    field:    { type: String, trim: true, maxlength: 100 },   // e.g. "priority", "type", "department"
+    operator: { type: String, enum: ["eq","neq","gt","gte","lt","lte","in","nin"], default: "eq" },
+    value:    { type: mongoose.Schema.Types.Mixed },           // comparison value
+    // If condition matches, jump to this stage order number (0 = continue normal flow)
+    targetStageOrder: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
 
+// ── Stage sub-schema ──────────────────────────────────────────────────────────
 const stageSchema = new mongoose.Schema(
   {
-    order: {
-      type:     Number,
-      required: true,
-      min:      1,
+    order: { type: Number, required: true, min: 1 },
+    name:  { type: String, required: true, trim: true, maxlength: 100 },
+
+    // "sequential" = one actor acts; "parallel" = multiple actors must act
+    stageType: {
+      type:    String,
+      enum:    ["sequential", "parallel"],
+      default: "sequential",
     },
-    name: {
-      type:     String,
-      required: true,
-      trim:     true,
-      maxlength: 100,
-    },
-    // Role that is responsible for acting on this stage.
-    // "specific" means a particular userId is assigned (see assigneeUserId).
+
     assigneeRole: {
       type:    String,
       enum:    ["faculty", "hod", "admin", "specific"],
       default: "faculty",
     },
-    // Only used when assigneeRole === "specific"
-    assigneeUserId: {
-      type:    mongoose.Schema.Types.ObjectId,
-      ref:     "User",
-      default: null,
-    },
-    // Actions the assignee may take at this stage
+    assigneeUserId:  { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+
+    // For parallel stages: list of specific user IDs who must all act
+    parallelAssignees: { type: [mongoose.Schema.Types.ObjectId], ref: "User", default: [] },
+    // Minimum approvals needed to advance (0 = all assignees)
+    parallelQuorum: { type: Number, min: 0, default: 0 },
+
     allowedActions: {
       type:    [String],
       enum:    ["approve", "reject", "escalate", "close", "request_info"],
@@ -48,71 +57,26 @@ const stageSchema = new mongoose.Schema(
         message:   "At least one allowed action is required per stage",
       },
     },
-    // Whether the actor must provide a comment for any action
-    requiresComment: {
-      type:    Boolean,
-      default: false,
-    },
-    // Per-stage SLA in hours (0 = no SLA for this stage)
-    slaHours: {
-      type:    Number,
-      min:     0,
-      default: 48,
-    },
-    // Roles to notify when this stage becomes active
-    notifyOnEnter: {
-      type:    [String],
-      default: ["student"],
-    },
-    // If true, when slaHours elapses with no action, automatically apply autoAdvanceAction
-    autoAdvance: {
-      type:    Boolean,
-      default: false,
-    },
-    autoAdvanceAction: {
-      type:    String,
-      enum:    ["approve", "reject", "escalate", "close", "request_info", null],
-      default: null,
-    },
+    requiresComment: { type: Boolean, default: false },
+    slaHours:        { type: Number, min: 0, default: 48 },
+    notifyOnEnter:   { type: [String], default: ["student"] },
+    autoAdvance:        { type: Boolean, default: false },
+    autoAdvanceAction:  { type: String, enum: ["approve","reject","escalate","close","request_info",null], default: null },
+
+    // Feature 2: conditional routing rules evaluated BEFORE entering this stage
+    conditions: { type: [conditionSchema], default: [] },
   },
   { _id: true }
 );
 
 // ── Template schema ───────────────────────────────────────────────────────────
-
 const workflowTemplateSchema = new mongoose.Schema(
   {
-    name: {
-      type:     String,
-      required: true,
-      trim:     true,
-      maxlength: 120,
-    },
-    description: {
-      type:     String,
-      trim:     true,
-      maxlength: 500,
-      default:  "",
-    },
-    // Which request types this template automatically applies to.
-    // Empty array = manual assignment only (no auto-apply).
-    appliesToTypes: {
-      type:    [String],
-      default: [],
-    },
-    // "request" or "leave" — which entity kind this template is for
-    entityKind: {
-      type:    String,
-      enum:    ["request", "leave"],
-      default: "request",
-    },
-    // Only one template can be active per (entityKind, requestType) combination.
-    // Enforced at the application layer (not a unique index — types are an array).
-    isActive: {
-      type:    Boolean,
-      default: true,
-      index:   true,
-    },
+    name:           { type: String, required: true, trim: true, maxlength: 120 },
+    description:    { type: String, trim: true, maxlength: 500, default: "" },
+    appliesToTypes: { type: [String], default: [] },
+    entityKind:     { type: String, enum: ["request","leave"], default: "request" },
+    isActive:       { type: Boolean, default: true, index: true },
     stages: {
       type: [stageSchema],
       validate: {
@@ -120,28 +84,27 @@ const workflowTemplateSchema = new mongoose.Schema(
         message:   "A workflow template must have at least one stage",
       },
     },
-    // Schema version for future migrations
-    version: {
-      type:    Number,
-      default: 1,
-    },
-    createdBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref:  "User",
+    version:   { type: Number, default: 1 },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    // Feature 4: track previous versions (array of version snapshots)
+    versionHistory: {
+      type: [{
+        version:   Number,
+        snapshot:  mongoose.Schema.Types.Mixed,  // full stages array at that version
+        editedBy:  { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        editedAt:  { type: Date, default: Date.now },
+        note:      { type: String, default: "" },
+      }],
+      default: [],
     },
   },
   { timestamps: true }
 );
 
-// ── Indexes ───────────────────────────────────────────────────────────────────
 workflowTemplateSchema.index({ entityKind: 1, isActive: 1 });
 workflowTemplateSchema.index({ appliesToTypes: 1, isActive: 1 });
 
-// ── Virtuals / helpers ────────────────────────────────────────────────────────
-
-/**
- * Return stages sorted by order ascending (defensive — they should already be sorted).
- */
 workflowTemplateSchema.methods.sortedStages = function () {
   return [...this.stages].sort((a, b) => a.order - b.order);
 };

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import NotificationBell from "./NotificationBell";
+import NotificationBell from "./shared/NotificationBell";
 
 export default function Navbar() {
   const { user, logout } = useAuth();
@@ -94,15 +94,19 @@ export default function Navbar() {
         {/* Admin links */}
         {role === "admin" && (
           <>
-            <NavLink to="/admin"                className={linkClass} onClick={close}>Admin</NavLink>
-            <NavLink to="/admin/analytics"      className={linkClass} onClick={close}>Analytics</NavLink>
-            <NavLink to="/admin/users"          className={linkClass} onClick={close}>Users</NavLink>
-            <NavLink to="/admin/departments"    className={linkClass} onClick={close}>Departments</NavLink>
-            <NavLink to="/admin/leave-types"    className={linkClass} onClick={close}>Leave Types</NavLink>
-            <NavLink to="/admin/leave-reports"  className={linkClass} onClick={close}>Leave Reports</NavLink>
-            <NavLink to="/admin/audit-logs"     className={linkClass} onClick={close}>Audit Logs</NavLink>
+            <NavLink to="/admin"                         className={linkClass} onClick={close}>Admin</NavLink>
+            <NavLink to="/admin/analytics"               className={linkClass} onClick={close}>Analytics</NavLink>
+            <NavLink to="/admin/users"                   className={linkClass} onClick={close}>Users</NavLink>
+            <NavLink to="/admin/departments"             className={linkClass} onClick={close}>Departments</NavLink>
+            <NavLink to="/admin/leave-types"             className={linkClass} onClick={close}>Leave Types</NavLink>
+            <NavLink to="/admin/leave-reports"           className={linkClass} onClick={close}>Leave Reports</NavLink>
+            <NavLink to="/admin/workflow-templates"      className={linkClass} onClick={close}>Workflows</NavLink>
+            <NavLink to="/admin/audit-trail"             className={linkClass} onClick={close}>Audit Trail</NavLink>
           </>
         )}
+
+        {/* Notifications — all roles */}
+        <NavLink to="/notifications" className={linkClass} onClick={close}>Notifications</NavLink>
 
         <div className="cf-nav__divider" aria-hidden="true" />
 

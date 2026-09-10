@@ -2,8 +2,8 @@
  * workflowTemplate.routes.js — Admin CRUD for workflow templates.
  * Mounted at /api/admin/workflow-templates
  *
- * All routes require admin role. Implements versioning: editing a template
- * bumps its version but never mutates in-flight WorkflowInstances.
+ * Feature 4: Workflow Versioning — PUT now snapshots old stages into
+ * versionHistory before overwriting, and GET /:id/history returns history.
  */
 "use strict";
 
@@ -13,6 +13,8 @@ const WorkflowTemplate = require("../models/WorkflowTemplate");
 const WorkflowInstance = require("../models/WorkflowInstance");
 const { requireAuth }  = require("../middleware/auth");
 const User             = require("../models/User");
+const workflowSvc      = require("../services/workflow.service");
+const { writeAudit }   = require("../services/audit.service");
 
 const router = express.Router();
 
@@ -38,10 +40,13 @@ function validateStages(stages) {
   }
   const validRoles    = ["faculty", "hod", "admin", "specific"];
   const validActions  = ["approve", "reject", "escalate", "close", "request_info"];
+  const validTypes    = ["sequential", "parallel"];
   for (const [i, s] of stages.entries()) {
     if (!s.name || !String(s.name).trim()) return `Stage ${i + 1}: name is required`;
     if (!validRoles.includes(s.assigneeRole))
       return `Stage ${i + 1}: invalid assigneeRole "${s.assigneeRole}"`;
+    if (s.stageType && !validTypes.includes(s.stageType))
+      return `Stage ${i + 1}: stageType must be "sequential" or "parallel"`;
     if (!Array.isArray(s.allowedActions) || s.allowedActions.length === 0)
       return `Stage ${i + 1}: allowedActions must be a non-empty array`;
     for (const a of s.allowedActions) {
@@ -50,6 +55,8 @@ function validateStages(stages) {
     }
     if (s.slaHours !== undefined && (typeof s.slaHours !== "number" || s.slaHours < 0))
       return `Stage ${i + 1}: slaHours must be a non-negative number`;
+    if (s.parallelQuorum !== undefined && (typeof s.parallelQuorum !== "number" || s.parallelQuorum < 0))
+      return `Stage ${i + 1}: parallelQuorum must be a non-negative number`;
   }
   return null;
 }
@@ -105,16 +112,20 @@ router.post("/", requireAuth, requireAdmin, async (req, res, next) => {
 
     // Normalise stages — assign order based on array position
     const normStages = stages.map((s, i) => ({
-      order:             i + 1,
-      name:              String(s.name).trim(),
-      assigneeRole:      s.assigneeRole || "faculty",
-      assigneeUserId:    s.assigneeUserId || null,
-      allowedActions:    s.allowedActions,
-      requiresComment:   !!s.requiresComment,
-      slaHours:          typeof s.slaHours === "number" ? s.slaHours : 48,
-      notifyOnEnter:     Array.isArray(s.notifyOnEnter) ? s.notifyOnEnter : ["student"],
-      autoAdvance:       !!s.autoAdvance,
-      autoAdvanceAction: s.autoAdvanceAction || null,
+      order:              i + 1,
+      name:               String(s.name).trim(),
+      stageType:          s.stageType || "sequential",
+      assigneeRole:       s.assigneeRole || "faculty",
+      assigneeUserId:     s.assigneeUserId || null,
+      parallelAssignees:  Array.isArray(s.parallelAssignees) ? s.parallelAssignees : [],
+      parallelQuorum:     typeof s.parallelQuorum === "number" ? s.parallelQuorum : 0,
+      allowedActions:     s.allowedActions,
+      requiresComment:    !!s.requiresComment,
+      slaHours:           typeof s.slaHours === "number" ? s.slaHours : 48,
+      notifyOnEnter:      Array.isArray(s.notifyOnEnter) ? s.notifyOnEnter : ["student"],
+      autoAdvance:        !!s.autoAdvance,
+      autoAdvanceAction:  s.autoAdvanceAction || null,
+      conditions:         Array.isArray(s.conditions) ? s.conditions : [],
     }));
 
     const template = await WorkflowTemplate.create({
@@ -161,19 +172,23 @@ router.put("/:id", requireAuth, requireAdmin, async (req, res, next) => {
 
     if (stages !== undefined) {
       template.stages = stages.map((s, i) => ({
-        order:             i + 1,
-        name:              String(s.name).trim(),
-        assigneeRole:      s.assigneeRole || "faculty",
-        assigneeUserId:    s.assigneeUserId || null,
-        allowedActions:    s.allowedActions,
-        requiresComment:   !!s.requiresComment,
-        slaHours:          typeof s.slaHours === "number" ? s.slaHours : 48,
-        notifyOnEnter:     Array.isArray(s.notifyOnEnter) ? s.notifyOnEnter : ["student"],
-        autoAdvance:       !!s.autoAdvance,
-        autoAdvanceAction: s.autoAdvanceAction || null,
+        order:              i + 1,
+        name:               String(s.name).trim(),
+        stageType:          s.stageType || "sequential",
+        assigneeRole:       s.assigneeRole || "faculty",
+        assigneeUserId:     s.assigneeUserId || null,
+        parallelAssignees:  Array.isArray(s.parallelAssignees) ? s.parallelAssignees : [],
+        parallelQuorum:     typeof s.parallelQuorum === "number" ? s.parallelQuorum : 0,
+        allowedActions:     s.allowedActions,
+        requiresComment:    !!s.requiresComment,
+        slaHours:           typeof s.slaHours === "number" ? s.slaHours : 48,
+        notifyOnEnter:      Array.isArray(s.notifyOnEnter) ? s.notifyOnEnter : ["student"],
+        autoAdvance:        !!s.autoAdvance,
+        autoAdvanceAction:  s.autoAdvanceAction || null,
+        conditions:         Array.isArray(s.conditions) ? s.conditions : [],
       }));
-      // Bump version so in-flight instances (which hold snapshots) are unaffected
-      template.version = (template.version || 1) + 1;
+      // Feature 4: snapshot old version before bumping
+      await workflowSvc.snapshotTemplateVersion(template, req.userId, req.body.versionNote || "");
     }
 
     await template.save();
@@ -240,6 +255,17 @@ router.delete("/:id", requireAuth, requireAdmin, async (req, res, next) => {
     template.name     = `[DELETED] ${template.name}`;
     await template.save();
     res.json({ message: "Template deleted (soft)" });
+  } catch (err) { next(err); }
+});
+
+// ── GET /api/admin/workflow-templates/:id/history — Feature 4 ────────────────
+router.get("/:id/history", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    if (!isValidId(req.params.id))
+      return res.status(400).json({ message: "Invalid template id" });
+    const data = await workflowSvc.getTemplateVersionHistory(req.params.id);
+    if (!data) return res.status(404).json({ message: "Template not found" });
+    res.json({ template: data });
   } catch (err) { next(err); }
 });
 

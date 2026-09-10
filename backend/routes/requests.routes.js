@@ -15,6 +15,7 @@ const { emitRequestCreated, emitRequestStatusUpdated } = require("../socket/sock
 const emailSvc              = require("../services/email.service");
 const logger                = require("../config/logger");
 const { queueEmail }        = require("../queues/workers");
+const idempotency           = require("../middleware/idempotency");
 
 const router = express.Router();
 
@@ -257,7 +258,7 @@ router.get("/:id", requireAuth, async (req, res, next) => {
 });
 
 // POST /api/requests — student creates a new request
-router.post("/", requireAuth, async (req, res, next) => {
+router.post("/", requireAuth, idempotency(), async (req, res, next) => {
   try {
     const { errors, fields } = validateRequestInput(req.body || {});
     if (errors.length)
