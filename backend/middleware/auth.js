@@ -7,11 +7,9 @@
  * handle token rotation manually.
  */
 
-const { verifyAccessToken, signAccessToken, hashToken, setAuthCookie } = require("../utils/token");
+const { verifyAccessToken, signAccessToken, hashToken, setAuthCookie, COOKIE_NAME } = require("../utils/token");
 const RefreshToken = require("../models/RefreshToken");
 const User         = require("../models/User");
-
-const COOKIE_NAME = "token";
 
 async function requireAuth(req, res, next) {
   const token = req.cookies?.[COOKIE_NAME];
@@ -26,7 +24,6 @@ async function requireAuth(req, res, next) {
     return next();
   } catch (err) {
     if (err.name === "TokenExpiredError") {
-      // Access token expired — try silent refresh
       return _tryRefresh(req, res, next);
     }
     return res.status(401).json({ message: "Invalid or expired session" });
@@ -49,7 +46,6 @@ async function _tryRefresh(req, res, next) {
     const user = await User.findById(stored.userId).select("_id role").lean();
     if (!user) return res.status(401).json({ message: "User not found" });
 
-    // Issue a fresh access token (no refresh rotation here — that's /api/refresh)
     const newAccess = signAccessToken(user);
     setAuthCookie(res, newAccess);
 

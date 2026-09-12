@@ -11,17 +11,18 @@
 const jwt    = require("jsonwebtoken");
 const crypto = require("crypto");
 
-const { COOKIE_NAME } = require("../middleware/auth");
-const REFRESH_COOKIE  = "refreshToken";
+// Cookie name defined here to break circular dependency with auth.js
+// (auth.js imports token.js; token.js must NOT import auth.js)
+const COOKIE_NAME    = "token";
+const REFRESH_COOKIE = "refreshToken";
 
 // ── Token lifetimes ───────────────────────────────────────────────────────────
 const ACCESS_EXPIRES_IN  = process.env.JWT_EXPIRES_IN  || "15m";
 const REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_IN  || "30d";
 
-// Convert REFRESH_EXPIRES_IN string to milliseconds for cookie maxAge
 function parseExpiry(str) {
   const match = String(str).match(/^(\d+)([smhd])$/);
-  if (!match) return 30 * 24 * 60 * 60 * 1000; // fallback 30d
+  if (!match) return 30 * 24 * 60 * 60 * 1000;
   const [, n, unit] = match;
   const multipliers = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
   return Number(n) * (multipliers[unit] || 86400000);
@@ -37,12 +38,9 @@ function signAccessToken(user) {
   );
 }
 
-// Legacy alias kept for any callers that use signToken
-const signToken = signAccessToken;
+const signToken = signAccessToken; // backward-compat alias
 
-function signRefreshToken(userId) {
-  // Raw token is a random 64-char hex string — NOT a JWT
-  // (avoids needing a second secret, and the DB row IS the validity check)
+function signRefreshToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
@@ -54,17 +52,10 @@ function verifyAccessToken(token) {
   return jwt.verify(token, process.env.JWT_SECRET);
 }
 
-// ── Cookie setters ────────────────────────────────────────────────────────────
-
 function cookieOpts(maxAgeMs) {
-  const NODE_ENV    = process.env.NODE_ENV    || "development";
+  const NODE_ENV     = process.env.NODE_ENV     || "development";
   const LOCAL_DOCKER = process.env.LOCAL_DOCKER === "true";
-
-  // In production over HTTPS: secure=true, sameSite=none (cross-origin cookies work)
-  // In local Docker (http://localhost): secure=false, sameSite=lax (cookies work over HTTP)
-  // In development: secure=false, sameSite=lax
-  const isProd = NODE_ENV === "production" && !LOCAL_DOCKER;
-
+  const isProd       = NODE_ENV === "production" && !LOCAL_DOCKER;
   return {
     httpOnly: true,
     secure:   isProd,
@@ -75,7 +66,7 @@ function cookieOpts(maxAgeMs) {
 }
 
 function setAuthCookie(res, token) {
-  res.cookie(COOKIE_NAME, token, cookieOpts(15 * 60 * 1000)); // 15 min
+  res.cookie(COOKIE_NAME, token, cookieOpts(15 * 60 * 1000));
 }
 
 function setRefreshCookie(res, raw) {
@@ -89,7 +80,7 @@ function clearAuthCookie(res) {
 }
 
 module.exports = {
-  signToken,           // backward-compat alias
+  signToken,
   signAccessToken,
   signRefreshToken,
   hashToken,
@@ -97,6 +88,7 @@ module.exports = {
   setAuthCookie,
   setRefreshCookie,
   clearAuthCookie,
+  COOKIE_NAME,
   REFRESH_COOKIE,
   REFRESH_MS,
 };
