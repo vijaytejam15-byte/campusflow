@@ -459,3 +459,158 @@ describe('FileUploader', () => {
     expect(zone.tabIndex).toBe(-1);
   });
 });
+
+// ── WorkflowTracker ───────────────────────────────────────────────────────────
+
+import WorkflowTracker from './components/shared/WorkflowTracker';
+
+describe('WorkflowTracker', () => {
+  const mockWorkflow = {
+    templateName:      'Test Workflow',
+    currentStageIndex: 0,
+    overallStatus:     'in_progress',
+    isTerminal:        false,
+    stages: [
+      {
+        _id:          'stage1',
+        stageName:    'Faculty Review',
+        stageType:    'sequential',
+        status:       'in_progress',
+        assigneeRole: 'faculty',
+        slaDeadline:  new Date(Date.now() + 86400000).toISOString(),
+        slaBreached:  false,
+        slaWarned:    false,
+        conditions:   [],
+        parallelVotes:[],
+      },
+      {
+        _id:          'stage2',
+        stageName:    'HOD Approval',
+        stageType:    'sequential',
+        status:       'pending',
+        assigneeRole: 'hod',
+        slaDeadline:  null,
+        slaBreached:  false,
+        slaWarned:    false,
+        conditions:   [],
+        parallelVotes:[],
+      },
+    ],
+  };
+
+  test('renders workflow section', () => {
+    const { getByLabelText } = render(<WorkflowTracker workflow={mockWorkflow} />);
+    expect(getByLabelText(/workflow progress/i)).toBeInTheDocument();
+  });
+
+  test('shows template name', () => {
+    render(<WorkflowTracker workflow={mockWorkflow} />);
+    expect(screen.getByText(/Test Workflow/i)).toBeInTheDocument();
+  });
+
+  test('shows overall status badge', () => {
+    render(<WorkflowTracker workflow={mockWorkflow} />);
+    expect(screen.getByText('in progress')).toBeInTheDocument();
+  });
+
+  test('renders both stages', () => {
+    render(<WorkflowTracker workflow={mockWorkflow} />);
+    expect(screen.getByText('Faculty Review')).toBeInTheDocument();
+    expect(screen.getByText('HOD Approval')).toBeInTheDocument();
+  });
+
+  test('marks current stage with "Current" badge', () => {
+    render(<WorkflowTracker workflow={mockWorkflow} />);
+    expect(screen.getByText('Current')).toBeInTheDocument();
+  });
+
+  test('returns null when no workflow prop', () => {
+    const { container } = render(<WorkflowTracker workflow={null} />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  test('shows approved status correctly', () => {
+    const approved = { ...mockWorkflow, overallStatus: 'approved', isTerminal: true };
+    render(<WorkflowTracker workflow={approved} />);
+    expect(screen.getByText('approved')).toBeInTheDocument();
+  });
+
+  test('shows parallel stage badge', () => {
+    const parallelWf = {
+      ...mockWorkflow,
+      stages: [{
+        ...mockWorkflow.stages[0],
+        stageType: 'parallel',
+        parallelVotes: [{ actorId: '1', actorName: 'Prof X', action: 'approve', comment: '' }],
+        parallelQuorum: 2,
+      }],
+    };
+    render(<WorkflowTracker workflow={parallelWf} />);
+    expect(screen.getByText('Parallel')).toBeInTheDocument();
+  });
+});
+
+// ── WorkflowStageActions ──────────────────────────────────────────────────────
+
+import WorkflowStageActions from './components/shared/WorkflowStageActions';
+
+describe('WorkflowStageActions', () => {
+  const mockWorkflow = {
+    isTerminal:        false,
+    currentStageIndex: 0,
+    currentStage: {
+      stageName:      'Faculty Review',
+      assigneeRole:   'faculty',
+      allowedActions: ['approve', 'reject'],
+    },
+  };
+
+  test('returns null when workflow is terminal', () => {
+    const { container } = render(
+      <WorkflowStageActions
+        workflow={{ ...mockWorkflow, isTerminal: true }}
+        onAction={jest.fn()} userRole="faculty" submitting={false}
+      />
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  test('returns null when no workflow prop', () => {
+    const { container } = render(
+      <WorkflowStageActions workflow={null} onAction={jest.fn()} userRole="faculty" submitting={false} />
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  test('shows allowed action buttons for matching role', () => {
+    render(
+      <WorkflowStageActions workflow={mockWorkflow} onAction={jest.fn()} userRole="faculty" submitting={false} />
+    );
+    expect(screen.getByText('Approve')).toBeInTheDocument();
+    expect(screen.getByText('Reject')).toBeInTheDocument();
+  });
+
+  test('returns null when user role does not match stage role', () => {
+    const { container } = render(
+      <WorkflowStageActions workflow={mockWorkflow} onAction={jest.fn()} userRole="student" submitting={false} />
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  test('shows confirm panel when action button clicked', () => {
+    render(
+      <WorkflowStageActions workflow={mockWorkflow} onAction={jest.fn()} userRole="faculty" submitting={false} />
+    );
+    fireEvent.click(screen.getByText('Approve'));
+    // The confirm panel shows a paragraph starting with "Confirm:"
+    const confirmTexts = screen.getAllByText(/Confirm/i);
+    expect(confirmTexts.length).toBeGreaterThan(0);
+  });
+
+  test('admin can always act regardless of stage role', () => {
+    render(
+      <WorkflowStageActions workflow={mockWorkflow} onAction={jest.fn()} userRole="admin" submitting={false} />
+    );
+    expect(screen.getByText('Approve')).toBeInTheDocument();
+  });
+});

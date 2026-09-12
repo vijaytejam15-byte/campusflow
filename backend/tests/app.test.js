@@ -2112,6 +2112,23 @@ function futureDate(daysFromNow) {
   return d.toISOString().split("T")[0];
 }
 
+/** Return a future date that is guaranteed to be a weekday (Mon-Fri) */
+function futureWeekday(minDaysFromNow) {
+  const d = new Date();
+  d.setDate(d.getDate() + minDaysFromNow);
+  // Advance past any weekend
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return d.toISOString().split("T")[0];
+}
+
+/** Return a weekday that is strictly after `afterDateStr` */
+function weekdayAfter(afterDateStr, extraDays = 7) {
+  const d = new Date(afterDateStr);
+  d.setDate(d.getDate() + extraDays);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return d.toISOString().split("T")[0];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GAP 1 — File Upload pipeline
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2265,26 +2282,22 @@ describe("Leave quota enforcement", () => {
   });
 
   it("allows leave when within quota (2 working days)", async () => {
-    // Mon–Tue (2 working days)
-    const start = futureDate(7);  // pick a future Monday
-    const end   = futureDate(8);
+    // Two consecutive weekdays
+    const start = futureWeekday(7);
+    const end   = weekdayAfter(start, 1);
     const res = await studentAgent.post("/api/leave").send({
-      leaveTypeId,
-      startDate: start,
-      endDate:   end,
-      reason:    "Need some rest this week",
+      leaveTypeId, startDate: start, endDate: end,
+      reason: "Need some rest this week",
     });
     expect(res.status).toBe(201);
   });
 
   it("rejects leave when requested days exceed quota", async () => {
-    // 5 working days on a 3-day quota
-    const start = futureDate(7);
-    const end   = futureDate(13); // Mon–Fri next week = 5 working days
+    // 4 consecutive weekdays on a 3-day quota — start on Monday, end Thursday
+    const start = futureWeekday(7);
+    const end   = weekdayAfter(start, 3); // 4 days: Mon,Tue,Wed,Thu
     const res = await studentAgent.post("/api/leave").send({
-      leaveTypeId,
-      startDate: start,
-      endDate:   end,
+      leaveTypeId, startDate: start, endDate: end,
       reason:    "Need a full week off for personal reasons",
     });
     expect(res.status).toBe(400);
@@ -2292,20 +2305,20 @@ describe("Leave quota enforcement", () => {
   });
 
   it("counts existing pending leave toward quota", async () => {
-    // Apply for 2 days (within 3-day quota)
+    // First application: 2 weekdays (within 3-day quota)
+    const s1 = futureWeekday(14);
+    const e1 = weekdayAfter(s1, 1);
     await studentAgent.post("/api/leave").send({
-      leaveTypeId,
-      startDate: futureDate(14),
-      endDate:   futureDate(15),
-      reason:    "First application reason here",
+      leaveTypeId, startDate: s1, endDate: e1,
+      reason: "First application reason here",
     });
 
-    // Try to apply for 2 more days — total 4 > quota 3
+    // Second application: 2 more weekdays 3 weeks out — total 4 > quota 3
+    const s2 = futureWeekday(21);
+    const e2 = weekdayAfter(s2, 1);
     const res = await studentAgent.post("/api/leave").send({
-      leaveTypeId,
-      startDate: futureDate(21),
-      endDate:   futureDate(22),
-      reason:    "Second application needs to be blocked",
+      leaveTypeId, startDate: s2, endDate: e2,
+      reason: "Second application needs to be blocked",
     });
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/quota exceeded/i);
@@ -2317,11 +2330,13 @@ describe("Leave quota enforcement", () => {
       maxDaysPerYear: 0,
       isActive:       true,
     });
-    // 10 working days — should succeed with no quota
+    // 5 weekdays — should succeed with no quota
+    const s = futureWeekday(7);
+    const e = weekdayAfter(s, 4);
     const res = await studentAgent.post("/api/leave").send({
       leaveTypeId: unlimited._id.toString(),
-      startDate:   futureDate(7),
-      endDate:     futureDate(18),
+      startDate:   s,
+      endDate:     e,
       reason:      "Extended leave, no quota limit applies here",
     });
     expect(res.status).toBe(201);
@@ -2333,12 +2348,10 @@ describe("Leave quota enforcement", () => {
       maxDaysPerYear: 10,
       isActive:       true,
     });
-    const start = futureDate(28);
-    const end   = futureDate(29); // 2 working days
+    const start = futureWeekday(28);
+    const end   = weekdayAfter(start, 1);
     await studentAgent.post("/api/leave").send({
-      leaveTypeId: lt._id.toString(),
-      startDate:   start,
-      endDate:     end,
+      leaveTypeId: lt._id.toString(), startDate: start, endDate: end,
       reason:      "Checking balance decrement after approval",
     });
     const leaveDoc = await Leave.findOne({ student: studentId }).lean();
@@ -2362,10 +2375,10 @@ describe("Leave quota enforcement", () => {
       maxDaysPerYear: 5,
       isActive:       true,
     });
+    const start = futureWeekday(35);
+    const end   = weekdayAfter(start, 1);
     await studentAgent.post("/api/leave").send({
-      leaveTypeId: lt._id.toString(),
-      startDate:   futureDate(35),
-      endDate:     futureDate(36),
+      leaveTypeId: lt._id.toString(), startDate: start, endDate: end,
       reason:      "This should be rejected and balance restored",
     });
     const leaveDoc = await Leave.findOne({ student: studentId, leaveType: lt._id }).lean();
@@ -2664,8 +2677,8 @@ describe("PATCH /api/admin/users/:id/advisor", () => {
 
     const leaveRes = await stAgent.post("/api/leave").send({
       leaveTypeId: lt._id.toString(),
-      startDate:   futureDate(7),
-      endDate:     futureDate(7),
+      startDate:   futureWeekday(7),
+      endDate:     futureWeekday(7),
       reason:      "Advisor auto-assignment test leave",
     });
     expect(leaveRes.status).toBe(201);

@@ -224,3 +224,35 @@ export async function getAllRequests({ status, type, page = 1, limit = 20 } = {}
 export async function getAnalytics() {
   return api._request("/api/admin/analytics", { method: "GET" });
 }
+
+// ── Workflow metrics (Feature 10) ─────────────────────────────────────────────
+
+/**
+ * Fetch workflow engine metrics (instances by status, SLA breach rate, avg stages).
+ *
+ * @returns {Promise<{ workflowMetrics, leaveMetrics }>}
+ */
+export async function getWorkflowMetrics() {
+  return api._request("/api/admin/workflow-metrics", { method: "GET" });
+}
+
+// ── Unified Audit Trail (Feature 7) ──────────────────────────────────────────
+
+/**
+ * Fetch the full unified audit trail (all entity kinds).
+ * Separate from getAuditLogs() which only covers Request comments.
+ *
+ * @param {{ action?, entityKind?, actorId?, from?, to?, page?, limit? }} params
+ * @returns {Promise<{ logs, pagination }>}
+ */
+export async function getAuditTrail({ action, entityKind, actorId, from, to, page = 1, limit = 30 } = {}) {
+  const p = new URLSearchParams();
+  if (action)     p.set("action",     action);
+  if (entityKind) p.set("entityKind", entityKind);
+  if (actorId)    p.set("actorId",    actorId);
+  if (from)       p.set("from",       from);
+  if (to)         p.set("to",         to);
+  p.set("page",  String(page));
+  p.set("limit", String(limit));
+  return api._request(`/api/admin/audit-trail?${p.toString()}`, { method: "GET" });
+}

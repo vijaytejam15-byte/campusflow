@@ -1,7 +1,87 @@
-# CampusFlow — Phase 2 + 3 (Production-Ready)
+# CampusFlow — Phase 2 + Phase 3 (Production-Ready)
 
-A production-grade University Request & Leave Management System.
-**Test Status: 102 backend · 53 frontend · Build ✅**
+A production-grade University Request & Leave Management System with an advanced configurable workflow engine.
+
+**Test Status: 273 backend · 67 frontend · Build ✅**
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 19, React Router v7, Socket.io-client |
+| Backend | Node.js 20, Express 5, Mongoose 9 |
+| Database | MongoDB 7 (in-memory for dev, Atlas for prod) |
+| Auth | JWT access token (15 min) + refresh token (30 days), HTTP-only cookies |
+| Email | Nodemailer (async, graceful degradation in dev) |
+| File storage | Multer — local disk (S3-ready swap) |
+| Logging | Winston structured JSON logging |
+| Security | Helmet, rate-limiting, bcrypt (cost 12), idempotency keys |
+| API docs | Swagger UI at `/api/docs` |
+| Container | Docker + docker-compose |
+| CI/CD | GitHub Actions |
+
+---
+
+## Features
+
+### Core
+- 4 roles: student · faculty · HOD · admin
+- 7 request types with SLA, priority, comments, file attachments
+- Leave management: apply, review, balance enforcement, quota tracking
+- Real-time Socket.io notifications + persistent Notification Center
+- Email notifications for all events (async, dev-safe)
+- File uploads (Multer, MIME validation, S3-ready)
+- Department persistence (MongoDB collection)
+- Password change with session invalidation
+- Advisor assignment for students
+
+### Advanced Workflow Engine (10 Features)
+1. **Advanced Workflow Engine** — configurable multi-stage approval templates
+2. **Conditional Transitions** — rule-based routing (field conditions → jump to stage)
+3. **Parallel Approvals** — multi-voter stages with configurable quorum
+4. **Workflow Versioning** — immutable snapshots, full version history per template
+5. **SLA Monitoring & Escalation** — warning at 75% threshold, breach notifications, auto-escalation
+6. **Notification Center** — persistent in-app notifications, real-time bell badge
+7. **Audit Trail** — unified system-wide mutation log with filtering and CSV export
+8. **Idempotency** — `Idempotency-Key` header support on all mutating endpoints
+9. **Concurrency Control** — optimistic locking (`__v`) on workflow instances
+10. **Analytics Dashboard** — workflow metrics, leave stats, CSV export, enhanced charts
+
+---
+
+## Running Tests
+
+```bash
+# Backend — 273 integration tests
+cd backend && npm test
+
+# Frontend — 69 component tests
+cd frontend && npm test -- --watchAll=false
+
+# Production build
+cd frontend && npm run build
+```
+
+---
+
+## API Endpoints (selected new endpoints)
+
+| Method | Path | Roles | Description |
+|--------|------|-------|-------------|
+| POST | /api/upload | any auth | Upload files (multipart), returns metadata |
+| POST | /api/change-password | any auth | Change password, invalidate other sessions |
+| GET/PATCH/DELETE | /api/notifications | any auth | Notification Center |
+| GET | /api/notifications/unread-count | any auth | Badge count |
+| GET | /api/admin/audit-trail | admin | Unified audit log |
+| GET | /api/admin/workflow-metrics | admin | Workflow engine metrics |
+| GET | /api/admin/departments | admin | Department list with member counts |
+| POST/PATCH/DELETE | /api/admin/departments | admin | Department CRUD |
+| PATCH | /api/admin/users/:id/advisor | admin | Assign advisor to student |
+| GET | /api/admin/workflow-templates/:id/history | admin | Template version history |
+| GET/POST | /api/requests/:id/workflow | any auth | Workflow instance status/advance |
+| GET/POST | /api/leave/:id/workflow | any auth | Leave workflow status/advance |
 
 ---
 

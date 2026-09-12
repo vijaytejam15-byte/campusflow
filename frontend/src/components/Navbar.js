@@ -1,13 +1,42 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import { io } from "socket.io-client";
 import NotificationBell from "./shared/NotificationBell";
 
+const SOCKET_URL = process.env.REACT_APP_API_URL || "";
+
 export default function Navbar() {
-  const { user, logout } = useAuth();
-  const navigate = useNavigate();
+  const { user, logout, isAuthenticated } = useAuth();
+  const navigate  = useNavigate();
+  const socketRef = useRef(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [menuOpen,   setMenuOpen]   = useState(false);
+  const [socket,     setSocket]     = useState(null);
+
+  // Connect socket when authenticated, disconnect on logout
+  useEffect(() => {
+    if (!isAuthenticated) {
+      if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; setSocket(null); }
+      return;
+    }
+    if (socketRef.current?.connected) return;
+
+    const s = io(SOCKET_URL || window.location.origin, {
+      withCredentials: true,
+      transports: ["websocket", "polling"],
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000,
+    });
+    s.on("connect", () => {
+      s.emit("JOIN_ROLE_ROOM", user?.role ?? "student");
+    });
+    s.on("connect_error", (err) => console.warn("[Socket]", err.message));
+    socketRef.current = s;
+    setSocket(s);
+
+    return () => { s.disconnect(); socketRef.current = null; setSocket(null); };
+  }, [isAuthenticated, user?.role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const role = user?.role ?? "student";
 
@@ -112,7 +141,7 @@ export default function Navbar() {
 
         {/* Right slot: notification bell + user chip + logout */}
         <div className="cf-topbar__right">
-          <NotificationBell />
+          <NotificationBell socket={socket} />
 
           <div className="cf-user">
             <span className="cf-avatar" aria-hidden="true">{initials}</span>

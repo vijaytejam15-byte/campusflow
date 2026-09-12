@@ -93,3 +93,17 @@ export async function deleteWorkflowTemplate(id) {
 export async function getActiveWorkflowTemplates() {
   return api._request("/api/config/workflow-templates", { method: "GET" });
 }
+
+// ── Feature 4: Version history ────────────────────────────────────────────────
+
+export async function getWorkflowTemplateHistory(id) {
+  return api._request(`/api/admin/workflow-templates/${encodeURIComponent(id)}/history`, {
+    method: "GET",
+  });
+}
+
+// ── Feature 10: Workflow metrics ──────────────────────────────────────────────
+
+export async function getWorkflowMetrics() {
+  return api._request("/api/admin/workflow-metrics", { method: "GET" });
+}
