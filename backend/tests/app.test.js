@@ -3509,3 +3509,139 @@ describe("Faculty promotion and login flow", () => {
     expect(adminRes.status).toBe(403);
   });
 });
+
+// =============================================================================
+// NOTIFICATION TESTS — request and leave status changes
+// =============================================================================
+
+describe("Notifications: request status changes create student notifications", () => {
+  let studentAgent, studentId, hodAgent;
+
+  beforeEach(async () => {
+    const s = await makeAdv("notreqst@t.com", "student");
+    studentAgent = s.agent; studentId = s.userId;
+    const h = await makeAdv("notreqhod@t.com", "hod");
+    hodAgent = h.agent;
+  });
+
+  it("HOD approval creates an unread notification for the student", async () => {
+    const created = await studentAgent.post("/api/requests").send({
+      type: "general", description: "Notification test request for HOD approval flow", priority: "normal",
+    });
+    const reqId = created.body.request._id;
+
+    // HOD approves
+    await hodAgent.patch(`/api/requests/${reqId}/status`).send({ status: "approved", comment: "HOD approved" });
+
+    // Student checks notifications
+    const notifRes = await studentAgent.get("/api/notifications");
+    expect(notifRes.status).toBe(200);
+    const notifs = notifRes.body.notifications;
+    expect(notifs.length).toBeGreaterThan(0);
+
+    const approvalNotif = notifs.find((n) => n.entityId === reqId && n.title && n.title.toLowerCase().includes("approved"));
+    expect(approvalNotif).toBeDefined();
+    expect(approvalNotif.read).toBe(false);
+    expect(approvalNotif.userId.toString()).toBe(studentId);
+  });
+
+  it("HOD rejection creates an unread notification for the student", async () => {
+    const created = await studentAgent.post("/api/requests").send({
+      type: "transcript", description: "Notification test request for HOD rejection flow", priority: "normal",
+    });
+    const reqId = created.body.request._id;
+
+    await hodAgent.patch(`/api/requests/${reqId}/status`).send({ status: "rejected", comment: "Insufficient docs" });
+
+    const notifRes = await studentAgent.get("/api/notifications");
+    expect(notifRes.status).toBe(200);
+    const rejNotif = notifRes.body.notifications.find((n) => n.entityId === reqId && n.title && n.title.toLowerCase().includes("rejected"));
+    expect(rejNotif).toBeDefined();
+    expect(rejNotif.read).toBe(false);
+  });
+
+  it("Faculty escalation creates a notification for the student", async () => {
+    const { agent: facAgent } = await makeAdv("notreqfac@t.com", "faculty");
+    const created = await studentAgent.post("/api/requests").send({
+      type: "grade_appeal", description: "Notification test request for faculty escalation", priority: "high",
+    });
+    const reqId = created.body.request._id;
+
+    await facAgent.patch(`/api/requests/${reqId}/status`).send({ status: "escalated", comment: "Needs HOD review" });
+
+    const notifRes = await studentAgent.get("/api/notifications");
+    expect(notifRes.status).toBe(200);
+    const escNotif = notifRes.body.notifications.find((n) => n.entityId === reqId && n.title && n.title.toLowerCase().includes("escalated"));
+    expect(escNotif).toBeDefined();
+    expect(escNotif.read).toBe(false);
+  });
+
+  it("notification belongs to the correct student, not the reviewer", async () => {
+    const { agent: otherStudent, userId: otherId } = await makeAdv("notreqother@t.com", "student");
+    const created = await studentAgent.post("/api/requests").send({
+      type: "financial_aid", description: "Ownership check notification test request here", priority: "normal",
+    });
+    const reqId = created.body.request._id;
+
+    await hodAgent.patch(`/api/requests/${reqId}/status`).send({ status: "approved", comment: "OK" });
+
+    // Other student sees no notification for this request
+    const otherNotifs = await otherStudent.get("/api/notifications");
+    const wrongNotif = (otherNotifs.body.notifications || []).find((n) => n.entityId === reqId);
+    expect(wrongNotif).toBeUndefined();
+
+    // Correct student sees it
+    const myNotifs = await studentAgent.get("/api/notifications");
+    const myNotif = (myNotifs.body.notifications || []).find((n) => n.entityId === reqId);
+    expect(myNotif).toBeDefined();
+  });
+});
+
+describe("Notifications: leave review decisions create student notifications", () => {
+  let studentAgent, studentId, facAgent;
+
+  beforeEach(async () => {
+    const s = await makeAdv("notlvst@t.com", "student");
+    studentAgent = s.agent; studentId = s.userId;
+    const f = await makeAdv("notlvfac@t.com", "faculty");
+    facAgent = f.agent;
+  });
+
+  it("leave approval creates an unread notification for the student", async () => {
+    const lt = await LeaveType.create({ name: "NotifLeave " + Date.now(), isActive: true });
+    const start = futureWeekday(7);
+    const end   = weekdayAfter(start, 1);
+    const lv = await studentAgent.post("/api/leave").send({
+      leaveTypeId: lt._id.toString(), startDate: start, endDate: end,
+      reason: "Notification test leave approval reason here",
+    });
+    const lvId = lv.body.leave._id;
+
+    await facAgent.patch(`/api/leave/${lvId}/review`).send({ decision: "approved", comment: "Approved fine" });
+
+    const notifRes = await studentAgent.get("/api/notifications");
+    expect(notifRes.status).toBe(200);
+    const approvalNotif = notifRes.body.notifications.find((n) => n.entityId === lvId && n.title && n.title.toLowerCase().includes("approved"));
+    expect(approvalNotif).toBeDefined();
+    expect(approvalNotif.read).toBe(false);
+  });
+
+  it("leave rejection creates an unread notification for the student", async () => {
+    const lt = await LeaveType.create({ name: "NotifLeaveRej " + Date.now(), isActive: true });
+    const start = futureWeekday(14);
+    const end   = weekdayAfter(start, 1);
+    const lv = await studentAgent.post("/api/leave").send({
+      leaveTypeId: lt._id.toString(), startDate: start, endDate: end,
+      reason: "Notification test leave rejection reason here",
+    });
+    const lvId = lv.body.leave._id;
+
+    await facAgent.patch(`/api/leave/${lvId}/review`).send({ decision: "rejected", comment: "Not approved" });
+
+    const notifRes = await studentAgent.get("/api/notifications");
+    expect(notifRes.status).toBe(200);
+    const rejNotif = notifRes.body.notifications.find((n) => n.entityId === lvId && n.title && n.title.toLowerCase().includes("rejected"));
+    expect(rejNotif).toBeDefined();
+    expect(rejNotif.read).toBe(false);
+  });
+});

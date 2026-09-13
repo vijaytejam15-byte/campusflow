@@ -16,6 +16,7 @@ const emailSvc              = require("../services/email.service");
 const logger                = require("../config/logger");
 const { queueEmail }        = require("../queues/workers");
 const idempotency           = require("../middleware/idempotency");
+const notifSvc              = require("../services/notification.service");
 
 const router = express.Router();
 
@@ -522,6 +523,32 @@ router.patch("/:id/status", requireAuth, requireReviewer, async (req, res, next)
           requestId:   request._id,
         }).catch(() => {});
       }
+
+      // Persistent in-app notification for the student
+      const studentId = request.student._id || request.student;
+      const typeLabel = request.type.replace(/_/g, " ");
+      const notifType = status === "approved" ? "request_status_changed"
+                      : status === "rejected" ? "request_status_changed"
+                      : status === "escalated"? "request_status_changed"
+                      : "request_status_changed";
+      const titleMap  = {
+        approved:  `Your ${typeLabel} request was approved`,
+        rejected:  `Your ${typeLabel} request was rejected`,
+        escalated: `Your ${typeLabel} request was escalated to HOD`,
+        closed:    `Your ${typeLabel} request was closed`,
+        in_review: `Your ${typeLabel} request is now in review`,
+      };
+      await notifSvc.createNotification({
+        userId:     studentId,
+        type:       notifType,
+        title:      titleMap[status] || `Your request status changed to ${status}`,
+        body:       trimmedComment
+          ? `${role.toUpperCase()} comment: ${trimmedComment}`
+          : `Reviewed by ${reviewerName || role}`,
+        entityKind: "request",
+        entityId:   request._id,
+        actionUrl:  `/student/requests/${request._id}`,
+      });
     } catch { /* non-fatal */ }
 
     res.json({ message: "Request updated", request });

@@ -30,6 +30,7 @@ const { requireAuth }    = require("../middleware/auth");
 const { emitRequestStatusUpdated, emitRequestCreated } = require("../socket/socketHandler");
 const { queueEmail }     = require("../queues/workers");
 const logger             = require("../config/logger");
+const notifSvc           = require("../services/notification.service");
 
 const router = express.Router();
 
@@ -643,6 +644,22 @@ router.patch("/:id/review", requireAuth, requireStaff, async (req, res, next) =>
           leaveId:   leave._id,
         }).catch(() => {});
       }
+
+      // Persistent in-app notification for the student
+      const studentId = leave.student._id || leave.student;
+      await notifSvc.createNotification({
+        userId:     studentId,
+        type:       "leave_status_changed",
+        title:      decision === "approved"
+          ? `Your ${leave.leaveTypeName || "leave"} application was approved`
+          : `Your ${leave.leaveTypeName || "leave"} application was rejected`,
+        body:       trimmedComment
+          ? `${role.toUpperCase()} comment: ${trimmedComment}`
+          : `Reviewed by ${staffName || role}`,
+        entityKind: "leave",
+        entityId:   leave._id,
+        actionUrl:  `/leave/${leave._id}`,
+      });
     } catch { /* non-fatal */ }
 
     res.json({ message: `Leave application ${decision}`, leave });
