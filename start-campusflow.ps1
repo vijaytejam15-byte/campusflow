@@ -11,7 +11,9 @@ function Write-Warn($msg)  { Write-Host " [WARN] $msg" -ForegroundColor Yellow }
 function Write-Fail($msg)  { Write-Host "[ERROR] $msg" -ForegroundColor Red }
 
 # ── 1. Node.js ────────────────────────────────────────────────────────────────
-$nodePath = (Get-Command node -ErrorAction SilentlyContinue)?.Source
+$nodePath = $null
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+if ($nodeCmd) { $nodePath = $nodeCmd.Source }
 if (-not $nodePath) {
     Write-Fail "Node.js not found. Download from https://nodejs.org"
     Read-Host "Press Enter to exit"
@@ -98,7 +100,9 @@ if ($ready) {
 Write-Step "Starting frontend on port 3000 (takes 1-2 minutes to compile)..."
 $frontendLog = Join-Path $Root "frontend.log"
 $env:BROWSER = "none"
-$npmCmd = (Get-Command "npm.cmd" -ErrorAction SilentlyContinue)?.Source
+$npmCmd = $null
+$npmCmdObj = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
+if ($npmCmdObj) { $npmCmd = $npmCmdObj.Source }
 if (-not $npmCmd) { $npmCmd = "npm.cmd" }
 $frontendProc = Start-Process -FilePath $npmCmd `
     -ArgumentList "start" `
