@@ -3391,3 +3391,121 @@ describe("Feature 10: Analytics Dashboard — workflow metrics", () => {
     expect(metrics.byStatus).toBeDefined();
   });
 });
+
+// =============================================================================
+// FACULTY CREATION / PROMOTION / LOGIN FLOW
+// =============================================================================
+
+describe("Faculty promotion and login flow", () => {
+  // A. Register a normal account
+  it("A: registers a new account with default role=student", async () => {
+    const res = await request(app).post("/api/register").send({
+      name: "New Faculty", email: "newfaculty@test.com", password: "pass1234",
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.user.role).toBe("student");
+  });
+
+  // B. Confirm initial role is student
+  it("B: new account cannot access faculty-only pending queue", async () => {
+    const agent = request.agent(app);
+    await agent.post("/api/register").send({ name: "NF", email: "nf@test.com", password: "pass1234" });
+    const res = await agent.get("/api/requests/pending");
+    expect(res.status).toBe(403);
+  });
+
+  // C+D. Admin promotes the user to faculty
+  it("C+D: admin can promote a registered user to faculty", async () => {
+    // Register user to be promoted
+    const targetRes = await request(app).post("/api/register").send({
+      name: "To Promote", email: "topromote@test.com", password: "pass1234",
+    });
+    const targetId = targetRes.body.user.id;
+
+    // Admin promotes
+    const adminAgent = request.agent(app);
+    await makeAdmin(adminAgent, USER_A);
+    const res = await adminAgent.patch(`/api/admin/users/${targetId}/role`).send({ role: "faculty" });
+    expect(res.status).toBe(200);
+    expect(res.body.user.role).toBe("faculty");
+  });
+
+  // E+F+G. Login after promotion returns faculty role
+  it("F+G: logging in after promotion returns role=faculty in the session", async () => {
+    const email = "loginpromoted@test.com";
+
+    // Register
+    const regRes = await request(app).post("/api/register").send({ name: "LP", email, password: "pass1234" });
+    const userId = regRes.body.user.id;
+
+    // Admin promotes
+    const adminAgent = request.agent(app);
+    await makeAdmin(adminAgent, USER_A);
+    await adminAgent.patch(`/api/admin/users/${userId}/role`).send({ role: "faculty" });
+
+    // Log in fresh
+    const loginAgent = request.agent(app);
+    const loginRes = await loginAgent.post("/api/login").send({ email, password: "pass1234" });
+    expect(loginRes.status).toBe(200);
+    expect(loginRes.body.user.role).toBe("faculty");
+
+    // /me also returns faculty role
+    const meRes = await loginAgent.get("/api/me");
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.role).toBe("faculty");
+  });
+
+  // H+I. Faculty dashboard / protected APIs work after promotion
+  it("H+I: promoted faculty can access faculty-only pending requests queue", async () => {
+    const email = "facultyaccess@test.com";
+    const regRes = await request(app).post("/api/register").send({ name: "FA", email, password: "pass1234" });
+    const userId = regRes.body.user.id;
+
+    const adminAgent = request.agent(app);
+    await makeAdmin(adminAgent, USER_A);
+    await adminAgent.patch(`/api/admin/users/${userId}/role`).send({ role: "faculty" });
+
+    const facultyAgent = request.agent(app);
+    await facultyAgent.post("/api/login").send({ email, password: "pass1234" });
+
+    const res = await facultyAgent.get("/api/requests/pending");
+    expect(res.status).toBe(200);
+    expect(res.body.requests).toBeDefined();
+  });
+
+  // J. Student cannot promote themselves to faculty
+  it("J: student cannot promote themselves to faculty", async () => {
+    const agent = request.agent(app);
+    const regRes = await agent.post("/api/register").send({ name: "SelfPromote", email: "selfpromote@test.com", password: "pass1234" });
+    const userId = regRes.body.user.id;
+
+    const res = await agent.patch(`/api/admin/users/${userId}/role`).send({ role: "faculty" });
+    expect(res.status).toBe(403);
+  });
+
+  // K. Unauthenticated user cannot promote anyone
+  it("K: unauthenticated request cannot change a user role", async () => {
+    const regRes = await request(app).post("/api/register").send({ name: "Unauth", email: "unauth@test.com", password: "pass1234" });
+    const userId = regRes.body.user.id;
+
+    const res = await request(app).patch(`/api/admin/users/${userId}/role`).send({ role: "faculty" });
+    expect(res.status).toBe(401);
+  });
+
+  // L. Existing student login still works
+  it("L: existing student login and access still works after faculty changes", async () => {
+    const agent = request.agent(app);
+    await agent.post("/api/register").send({ name: "StillStudent", email: "stillstudent@test.com", password: "pass1234" });
+    const meRes = await agent.get("/api/me");
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.role).toBe("student");
+
+    // Student can access their own routes
+    const reqRes = await agent.get("/api/requests");
+    expect(reqRes.status).toBe(200);
+
+    // Student still blocked from admin
+    const adminRes = await agent.get("/api/admin/metrics");
+    expect(adminRes.status).toBe(403);
+  });
+});
