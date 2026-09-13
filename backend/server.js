@@ -80,15 +80,8 @@ const AUTH_RATE_LIMIT_MAX = process.env.AUTH_RATE_LIMIT_MAX
   ? Number(process.env.AUTH_RATE_LIMIT_MAX)
   : (process.env.LOCAL_DOCKER === "true" ? 200 : 20);
 
-const authLimiter = rateLimit({
-  windowMs:        15 * 60 * 1000,
-  max:             AUTH_RATE_LIMIT_MAX,
-  standardHeaders: true,
-  legacyHeaders:   false,
-  message:         { message: "Too many login attempts. Please try again in 15 minutes." },
-  // Skip entirely in test (jest) and local Docker Desktop environments
-  skip: () => NODE_ENV === "test" || process.env.LOCAL_DOCKER === "true",
-});
+// NOTE: authLimiter is defined in auth.routes.js and applied only to
+// /login, /register, /refresh — NOT the entire /api prefix.
 
 const apiLimiter = rateLimit({
   windowMs:        60 * 1000,
@@ -191,7 +184,8 @@ app.get("/api/files/:key", requireAuth, async (req, res) => {
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.use("/api",             authLimiter, authRoutes);
+// authLimiter now lives in auth.routes.js — applied only to /login, /register, /refresh
+app.use("/api",             authRoutes);
 app.use("/api/profile",     profileRoutes);
 app.use("/api/courses",     courseRoutes);
 app.use("/api/requests",    requestRoutes);

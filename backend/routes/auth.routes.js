@@ -15,13 +15,14 @@
 
 const express  = require("express");
 const bcrypt   = require("bcryptjs");
+const rateLimit = require("express-rate-limit");
 
 const User         = require("../models/User");
 const RefreshToken = require("../models/RefreshToken");
 const { requireAuth }          = require("../middleware/auth");
 const {
   signAccessToken,
-  signToken,           // backward-compat alias
+  signToken,
   signRefreshToken,
   hashToken,
   setAuthCookie,
@@ -35,6 +36,21 @@ const logger                   = require("../config/logger");
 const { sendEmail }            = require("../services/email.service");
 
 const router = express.Router();
+
+// ── Auth-specific rate limiter (login / register / refresh only) ──────────────
+const NODE_ENV = process.env.NODE_ENV || "development";
+const AUTH_RATE_LIMIT_MAX = process.env.AUTH_RATE_LIMIT_MAX
+  ? Number(process.env.AUTH_RATE_LIMIT_MAX)
+  : (process.env.LOCAL_DOCKER === "true" ? 200 : 20);
+
+const authLimiter = rateLimit({
+  windowMs:        15 * 60 * 1000,
+  max:             AUTH_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message:         { message: "Too many login attempts. Please try again in 15 minutes." },
+  skip: () => NODE_ENV === "test" || process.env.LOCAL_DOCKER === "true",
+});
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -58,7 +74,7 @@ async function issueTokenPair(user, res, req) {
 
 // ── REGISTER ─────────────────────────────────────────────────────────────────
 
-router.post("/register", async (req, res, next) => {
+router.post("/register", authLimiter, async (req, res, next) => {
   try {
     let { name, email, password, phoneNumber } = req.body || {};
 
@@ -98,7 +114,7 @@ router.post("/register", async (req, res, next) => {
 
 // ── LOGIN ────────────────────────────────────────────────────────────────────
 
-router.post("/login", async (req, res, next) => {
+router.post("/login", authLimiter, async (req, res, next) => {
   try {
     let { email, password } = req.body || {};
 
@@ -125,7 +141,7 @@ router.post("/login", async (req, res, next) => {
 
 // ── REFRESH TOKEN ─────────────────────────────────────────────────────────────
 
-router.post("/refresh", async (req, res, next) => {
+router.post("/refresh", authLimiter, async (req, res, next) => {
   try {
     const raw = req.cookies?.refreshToken;
     if (!raw)
