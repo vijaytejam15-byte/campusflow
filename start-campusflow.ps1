@@ -83,7 +83,7 @@ $ready = $false
 for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Seconds 2
     try {
-        $r = Invoke-WebRequest -Uri "http://localhost:5000/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:5000/health" -UseBasicParsing -TimeoutSec 2
         if ($r.StatusCode -eq 200) { $ready = $true; break }
     } catch {}
 }
@@ -128,7 +128,7 @@ for ($i = 0; $i -lt 60; $i++) {
         }
     }
     try {
-        $r = Invoke-WebRequest -Uri "http://localhost:3000" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:3000" -UseBasicParsing -TimeoutSec 3
         if ($r.StatusCode -eq 200) { $ready = $true; break }
     } catch {}
 }
